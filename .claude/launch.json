@@ -2,26 +2,14 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "ars-api",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": [
-        "--prefix",
-        "backend",
-        "run",
-        "start"
-      ],
-      "port": 4000
+      "name": "ars-web",
+      "url": "http://localhost:3000",
+      "port": 3000
     },
     {
-      "name": "ars-web",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": [
-        "--prefix",
-        "frontend",
-        "run",
-        "dev"
-      ],
-      "port": 3000
+      "name": "ars-api",
+      "url": "http://localhost:4000",
+      "port": 4000
     }
   ]
 }

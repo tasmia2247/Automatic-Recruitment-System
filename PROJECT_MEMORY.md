@@ -55,7 +55,7 @@ circular generation. **Always a human decision:** approving requisitions, shortl
 
 Next.js, React, NestJS, PostgreSQL, DTOs with class-validator and pgAdmin are the stack confirmed in SRS v3.1 §21.1.
 
-Git: the repository exists on branch `master` with **no commits yet** and no remote. Nothing has been committed so far.
+Git: branch `main`, remote `origin` is `https://github.com/tasmia2247/Automatic-Recruitment-System` (public). Commit and push only when the owner asks.
 
 ---
 
@@ -98,6 +98,8 @@ Laid out to match the owner's `D:\pos` project. **Do not reintroduce `apps/` or 
 D:\ARS
 ├─ package.json            root scripts only (npm --prefix backend|frontend ...)
 ├─ README.md  CLAUDE.md  PROJECT_MEMORY.md
+├─ DOCKER.md  docker-compose.yml  docker-compose.dev.yml  .dockerignore
+├─ docker/Caddyfile        HTTPS entry point for production
 ├─ docs/                   empty
 ├─ backend/                independent project (own package.json, lock file, node_modules)
 │  ├─ src/
@@ -166,24 +168,24 @@ From the repo root:
 | Command | Purpose |
 | --- | --- |
 | `npm run setup` | Install backend and frontend dependencies |
-| `npm run db:local` | Start bundled PostgreSQL on port **54329**; data in `backend/.pgdata`; creates `ars` and `ars_test` on first run |
-| `npm run migrate` | Run TypeORM migrations |
-| `npm run seed` | Idempotent seed |
+| `docker compose -f docker-compose.dev.yml up -d` | Start the development stack. Docker PostgreSQL is the only development database |
+| `npm run db:local` | **Retired.** Starts the old bundled PostgreSQL on port 54329 with `backend/.pgdata`. Only to open that old copy |
+| `npm run migrate` | Run TypeORM migrations against Docker, through `backend/.env` |
+| `npm run seed` | Idempotent seed. **Do not run on the development database:** it already holds ARS data |
 | `npm run dev:api` / `npm run dev:web` | Watch-mode API (4000) / Next.js dev (3000) |
 | `npm run build` | Build backend, then frontend |
 | `npm run start:api` / `npm run start:web` | Run built output |
-| `npm test` | Backend Jest suite (needs the database running) |
+| `npm test` | Backend Jest suite. Uses `ars_test` on the Docker server, which must be created once (see `DOCKER.md`) |
 | `npm run typecheck` | `tsc --noEmit` in both projects |
 
 Generate a migration from `backend/`: `npm run migration:generate -- src/database/migrations/Name`. Then rename the file and
 class to the next `17933000000NN` number, because generated timestamps sort **before** the existing fixed-number migrations.
 
-`.claude/launch.json` defines `ars-api` (`npm --prefix backend run start`, i.e. `node dist/main.js`) and
-`ars-web` (`npm --prefix frontend run dev`).
+`.claude/launch.json` attaches `ars-api` and `ars-web` to the Docker ports 4000 and 3000. It starts nothing itself.
 
 ### Environment (`backend/.env`, never committed)
 
-`DATABASE_URL` and `JWT_SECRET` are required: the API, migrations and seed stop with an error without them. `seed` also needs `SEED_PASSWORD`. `npm run db:local` takes its password from `DATABASE_URL`. No credential has a default in the code. All other settings default in `backend/src/config/index.ts`.
+`DATABASE_URL` and `JWT_SECRET` are required: the API, migrations and seed stop with an error without them. `seed` also needs `SEED_PASSWORD`. In `backend/.env`, `DATABASE_URL` points at Docker (`127.0.0.1:55432`), and containers get theirs from `docker-compose.dev.yml`. No credential has a default in the code. All other settings default in `backend/src/config/index.ts`.
 
 `NODE_ENV`, `PORT`, `WEB_URL`, `DATABASE_URL`, `JWT_SECRET`, `JWT_EXPIRES_IN` (8h), `SEED_PASSWORD`, `CAREER_EMAIL`,
 `STORAGE_DIR` (`./storage`, relative to `backend/`), `MAX_UPLOAD_MB` (10), `ALLOWED_CV_EXTENSIONS` (pdf,docx,doc,txt),
@@ -193,9 +195,28 @@ Frontend: `API_URL` (`frontend/.env.local`, default `http://localhost:4000`). Te
 
 Empty `SMTP_HOST` means emails are written to `backend/storage/outbox/*.eml` and **not delivered**; transport is recorded as `dev-outbox`.
 
+### Docker
+
+[DOCKER.md](DOCKER.md) has every command and the test status. `docker-compose.yml` is production (Caddy, web, API, PostgreSQL 18,
+one-shot `migrate`; `seed` by hand, first install only). `docker-compose.dev.yml` is development (`up --watch`), a separate project
+with separate volumes. Both read a root `.env` that is never committed.
+
+- Build context is the repo root for both Dockerfiles, because each `package.json` depends on the root package (`ananta-ars: file:..`).
+- `API_URL` is fixed when the web image is built, because `next.config.ts` rewrites are evaluated at build time.
+- Production must use HTTPS: the auth cookie is `secure` when `NODE_ENV=production`. That is why Caddy is part of the stack.
+- PostgreSQL 18 images use the volume path `/var/lib/postgresql`, not `.../data`.
+- `seed` must not run automatically: it can recreate seeded records that were soft-deleted.
+- A new setting in `backend/src/config/index.ts` reaches the containers through `.env`. Add credentials to the `DOCKER.md` table by name, never with values.
+- As of 2026-11-01 the development stack has run on real Docker Desktop on the development PC. The production stack has not. `DOCKER.md` has the test status.
+- **Docker PostgreSQL is the single development database** (owner, 2026-11-01): database `ars` in `ars-dev-db-1`, volume `ars-dev_db_data`; documents in `ars-dev_api_storage`. Never run `down -v` on it. The old `backend/.pgdata` and `backend/storage` were moved here by dump and restore and left unchanged. The earlier seed-only database is kept as `ars_pre_migration`. `DOCKER.md` has the migration record.
+- Migrated accounts keep their old passwords. `SEED_PASSWORD` in the root `.env` does not sign in to them.
+- `nest start --watch` stops the old process with `ps`, which `node:bookworm-slim` lacks, so without `procps` a reload fails with `EADDRINUSE` and keeps serving old code. The `dev` stage installs it. The production image does not need it.
+- Every sign-in updates `users.lastLoginAt` and `updatedAt`. Allow for that when comparing the `ars` database with a backup.
+- Once in 11 starts after `down`, `up -d` printed `dependency api failed to start` and left `web` unstarted. The cause was not found; the next `up -d` recovered.
+
 ### Operational lessons
 
-- **The `ars-api` preview runs the compiled `dist/`.** After backend changes: migrate if needed, `npm run build`, restart. A
+- **The API runs in Docker.** Without `--watch`, backend changes need `docker compose -f docker-compose.dev.yml up -d --build`. A
   "Cannot DELETE /api/..." style error meant the running API was an old build.
 - **Port 4000 clash:** the owner's `D:\pos` backend also uses port 4000. Check before assuming ARS is the listener.
 - After stale-UI reports, compare with what the server serves. Open tabs kept old page code once the dev server's
@@ -203,9 +224,9 @@ Empty `SMTP_HOST` means emails are written to `backend/storage/outbox/*.eml` and
 - `backend/tsconfig.json` must not use `incremental`: `nest build` with `deleteOutDir` plus a stale tsbuildinfo gave a partial `dist`.
 - Stopping the `db:local` npm process can leave `postgres.exe` running. Stop it with `pg_ctl stop -D backend/.pgdata -m fast`, using
   the `pg_ctl.exe` under `backend/node_modules/@embedded-postgres/windows-x64/native/bin/`.
-- The machine's installed PostgreSQL 18 service needs a password that is not available here; development uses `db:local`.
-- A database in another encoding rejects Bangla text. `local-db.js` forces UTF8, and the API logs an error on boot if the encoding is not UTF8.
-- Backup: database and storage folder together. Commands are in the README (AC-28).
+- The machine's installed PostgreSQL 18 service (port 5432) is not used by ARS.
+- A database in another encoding rejects Bangla text. The Compose files force UTF8, and the API logs an error on boot if the encoding is not UTF8.
+- Backup: database and storage volume together. Commands are in `DOCKER.md` (AC-28).
 
 ---
 

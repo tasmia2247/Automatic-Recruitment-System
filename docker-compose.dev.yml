@@ -1,0 +1,131 @@
+# Local development with hot reload: docker compose -f docker-compose.dev.yml up --build --watch
+# Separate project name and volumes, so it never shares data with the production stack.
+name: ars-dev
+
+x-api-env: &api-env
+  NODE_ENV: development
+  PORT: "4000"
+  WEB_URL: http://localhost:3000
+  DATABASE_URL: postgres://${DB_USER:-ars}:${DB_PASSWORD:?Set DB_PASSWORD in .env}@db:5432/${DB_NAME:-ars}
+  JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+  STORAGE_DIR: ./storage
+  SEED_PASSWORD: ""
+
+services:
+  db:
+    image: postgres:18-bookworm
+    environment:
+      POSTGRES_USER: ${DB_USER:-ars}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:-ars}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+    ports:
+      # This PC only, for pgAdmin.
+      - "127.0.0.1:${DB_PORT:-55432}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  migrate:
+    image: ars-api:dev
+    pull_policy: never
+    command: ["npm", "run", "migration:run"]
+    env_file: .env
+    environment: *api-env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  # First run only: docker compose -f docker-compose.dev.yml run --rm seed
+  seed:
+    image: ars-api:dev
+    pull_policy: never
+    profiles: [tools]
+    command: ["npm", "run", "seed"]
+    env_file: .env
+    environment:
+      <<: *api-env
+      SEED_PASSWORD: ${SEED_PASSWORD:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ars-api:dev
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: dev
+    env_file: .env
+    environment: *api-env
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - api_storage:/app/backend/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    init: true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 10
+    # Files are copied into the container on save. This works the same on Windows and Ubuntu.
+    develop:
+      watch:
+        - action: sync
+          path: ./backend/src
+          target: /app/backend/src
+        - action: sync
+          path: ./backend/test
+          target: /app/backend/test
+        - action: rebuild
+          path: ./backend/package.json
+        - action: rebuild
+          path: ./backend/package-lock.json
+
+  web:
+    image: ars-web:dev
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      target: dev
+    environment:
+      API_URL: http://api:4000
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      start_period: 60s
+      retries: 10
+    develop:
+      watch:
+        - action: sync
+          path: ./frontend/src
+          target: /app/frontend/src
+        - action: sync+restart
+          path: ./frontend/next.config.ts
+          target: /app/frontend/next.config.ts
+        - action: rebuild
+          path: ./frontend/package.json
+        - action: rebuild
+          path: ./frontend/package-lock.json
+
+volumes:
+  db_data:
+  api_storage:
