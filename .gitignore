@@ -1,0 +1,27 @@
+node_modules/
+dist/
+.next/
+*.tsbuildinfo
+*.log
+next-env.d.ts
+
+# Environment files and secrets (examples stay tracked)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Database data and dumps
+.pgdata/
+*.sql
+*.sql.gz
+*.dump
+*.backup
+*.bak
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded CVs, attachments and email outbox
+storage/

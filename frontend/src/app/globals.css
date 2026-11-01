@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-50: #eef5ff;
+  --color-brand-100: #d9e8ff;
+  --color-brand-200: #bcd7ff;
+  --color-brand-500: #2f6fed;
+  --color-brand-600: #1f57d6;
+  --color-brand-700: #1a46ad;
+  --color-brand-900: #142c63;
+  --color-ink: #1b2433;
+  --color-muted: #5f6b7d;
+  --color-line: #e3e8ef;
+  --color-canvas: #f5f7fb;
+  --font-sans: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+html, body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+}
+
+/* Form No. 01 print layout */
+@media print {
+  .no-print { display: none !important; }
+  body { background: #fff; }
+  .print-sheet { box-shadow: none !important; border: none !important; margin: 0 !important; max-width: none !important; }
+}
