@@ -183,6 +183,7 @@ export async function seed(ds: DataSource, log = console.log) {
   for (const title of POSITIONS) if (!(await m.exists(Position, { where: { title } }))) await m.insert(Position, { title });
 
   const dept = async (code: string) => (await m.findOneByOrFail(Department, { code })).id;
+  if (!config.seedPassword) throw new Error('SEED_PASSWORD is not set. Add it to backend/.env (see README).');
   const hash = await bcrypt.hash(config.seedPassword, 10);
   for (const [email, name, designation, dcode, roleCodes] of USERS) {
     if (await m.exists(User, { where: { email } })) continue;

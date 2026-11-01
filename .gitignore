@@ -5,10 +5,10 @@ dist/
 *.log
 next-env.d.ts
 
-# Environment files and secrets (examples stay tracked)
+# Environment files and secrets, examples included
 .env
 .env.*
-!.env.example
+*.env
 *.pem
 *.key
 

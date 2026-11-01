@@ -181,13 +181,15 @@ class to the next `17933000000NN` number, because generated timestamps sort **be
 `.claude/launch.json` defines `ars-api` (`npm --prefix backend run start`, i.e. `node dist/main.js`) and
 `ars-web` (`npm --prefix frontend run dev`).
 
-### Environment (`backend/.env`, example in `backend/.env.example`)
+### Environment (`backend/.env`, never committed)
+
+`DATABASE_URL` and `JWT_SECRET` are required: the API, migrations and seed stop with an error without them. `seed` also needs `SEED_PASSWORD`. `npm run db:local` takes its password from `DATABASE_URL`. No credential has a default in the code. All other settings default in `backend/src/config/index.ts`.
 
 `NODE_ENV`, `PORT`, `WEB_URL`, `DATABASE_URL`, `JWT_SECRET`, `JWT_EXPIRES_IN` (8h), `SEED_PASSWORD`, `CAREER_EMAIL`,
 `STORAGE_DIR` (`./storage`, relative to `backend/`), `MAX_UPLOAD_MB` (10), `ALLOWED_CV_EXTENSIONS` (pdf,docx,doc,txt),
 `ID_FORMAT_REQUISITION|VACANCY|JOBPOST|CANDIDATE|APPLICATION|IMPORT`, `SMTP_HOST|PORT|SECURE|USER|PASS`, `MAIL_FROM`,
 `WORKER_INTERVAL_MS` (3000), `WORKER_ENABLED`, `ALLOW_DIRECT_HR_VACANCY`, `REQUISITION_ID_ON` (`draft`|`submit`).
-Frontend: `API_URL` (see `frontend/.env.example`). Tests: `TEST_DATABASE_URL`.
+Frontend: `API_URL` (`frontend/.env.local`, default `http://localhost:4000`). Tests: `TEST_DATABASE_URL`, otherwise `DATABASE_URL` with the database name swapped to `ars_test`.
 
 Empty `SMTP_HOST` means emails are written to `backend/storage/outbox/*.eml` and **not delivered**; transport is recorded as `dev-outbox`.
 
@@ -812,6 +814,7 @@ To check circular layout without data, from `backend/`: `npx ts-node scripts/sam
 | Soft delete for users | Owner, 2026-10-29: keep history, restorable, email reusable |
 | Permission codes fixed; labels, groups and on/off editable | Owner, 2026-10-29: a code created in the UI would protect nothing |
 | Backend and frontend are independent projects | Owner, 2026-10-29: match `D:\pos`; `.pgdata` and `storage` moved into `backend/` |
+| No env file, example included, and no credential is ever committed | Owner, 2026-11-01: `.gitignore` covers `.env`, `.env.*` and database files; required settings are listed in the README without values |
 | `pdfkit` for the circular | Direct server-side PDF download |
 | HR queue page defaults to All approved | Owner, 2026-10-29 |
 

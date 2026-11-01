@@ -29,15 +29,25 @@ Install both from the repo root:
 npm run setup
 ```
 
-1. **Database.** Either point `backend/.env` → `DATABASE_URL` at your PostgreSQL (database **must be UTF8**:
+1. **Configure.** Create `backend/.env` with your own values. Env files are never committed, and the API will not
+   start without the first two:
+
+   ```env
+   DATABASE_URL=postgres://ars:<database-password>@localhost:54329/ars
+   JWT_SECRET=<long-random-string>
+   SEED_PASSWORD=<password-for-seeded-users>
+   ```
+
+   Every other setting and its default is in `backend/src/config/index.ts`.
+
+2. **Database.** Either point `DATABASE_URL` at your PostgreSQL (database **must be UTF8**:
    `CREATE DATABASE ars ENCODING 'UTF8' TEMPLATE template0;`), or start the bundled throwaway PostgreSQL
-   (real Postgres binaries, port 54329, data in `backend/.pgdata/`):
+   (real Postgres binaries, port 54329, data in `backend/.pgdata/`, password taken from `DATABASE_URL`):
 
    ```bash
    npm run db:local
    ```
 
-2. **Configure:** copy `backend/.env.example` to `backend/.env` (already done for local dev) and adjust.
 3. **Migrate and seed** (seed is idempotent):
 
    ```bash
@@ -58,7 +68,7 @@ npm run setup
    npm run dev:web
    ```
 
-   Open http://localhost:3000. The web app proxies `/api/*` to the API (`frontend/.env.example` → `API_URL`).
+   Open http://localhost:3000. The web app proxies `/api/*` to the API (`API_URL` in `frontend/.env.local`, default `http://localhost:4000`).
 
 ### Prototype accounts
 

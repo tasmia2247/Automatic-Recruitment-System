@@ -10,10 +10,15 @@ const path = require('path');
 const fs = require('fs');
 const EmbeddedPostgres = require('embedded-postgres').default;
 
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env'), quiet: true });
+
 const port = Number(process.env.LOCAL_PG_PORT || 54329);
 const dataDir = path.resolve(__dirname, '..', '.pgdata');
 
 async function main() {
+  // The password comes from DATABASE_URL in backend/.env, never from the code.
+  const password = decodeURIComponent(new URL(process.env.DATABASE_URL || 'postgres://x').password);
+  if (!password) throw new Error('DATABASE_URL with a password is not set. Add it to backend/.env (see README).');
   if (process.env.LOCAL_PG_RESET === '1' && fs.existsSync(dataDir)) {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
@@ -21,7 +26,7 @@ async function main() {
   const pg = new EmbeddedPostgres({
     databaseDir: dataDir,
     user: 'ars',
-    password: 'ars_local_dev',
+    password,
     port,
     persistent: true,
     // Force UTF-8: on Windows initdb otherwise inherits WIN1252, which rejects Bangla text.
@@ -33,7 +38,7 @@ async function main() {
     await pg.createDatabase('ars');
     await pg.createDatabase('ars_test');
   }
-  console.log(`Local PostgreSQL ready: postgres://ars:ars_local_dev@localhost:${port}/ars (and /ars_test)`);
+  console.log(`Local PostgreSQL ready on port ${port} (databases ars and ars_test)`);
   const stop = async () => { await pg.stop(); process.exit(0); };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);

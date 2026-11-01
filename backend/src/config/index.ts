@@ -7,14 +7,20 @@ dotenv.config({ path: path.join(BACKEND_DIR, '.env'), quiet: true });
 
 const env = (key: string, fallback = '') => process.env[key] ?? fallback;
 const bool = (key: string, fallback: boolean) => (process.env[key] === undefined ? fallback : process.env[key] === 'true');
+/** Credentials have no default in the code: they live only in backend/.env. */
+const required = (key: string) => {
+  const value = process.env[key];
+  if (!value) throw new Error(`${key} is not set. Add it to backend/.env (see README).`);
+  return value;
+};
 
 /** Central typed configuration; every value comes from the environment (SRS 21.2). */
 export const config = {
   env: env('NODE_ENV', 'development'),
   port: Number(env('PORT', '4000')),
   webUrl: env('WEB_URL', 'http://localhost:3000'),
-  databaseUrl: env('DATABASE_URL', 'postgres://ars:ars_local_dev@localhost:54329/ars'),
-  jwtSecret: env('JWT_SECRET', 'dev-only-secret-change-me'),
+  databaseUrl: required('DATABASE_URL'),
+  jwtSecret: required('JWT_SECRET'),
   jwtExpiresIn: env('JWT_EXPIRES_IN', '8h'),
   storageDir: path.resolve(BACKEND_DIR, env('STORAGE_DIR', './storage')),
   maxUploadBytes: Number(env('MAX_UPLOAD_MB', '10')) * 1024 * 1024,
@@ -39,7 +45,7 @@ export const config = {
   workerEnabled: bool('WORKER_ENABLED', true),
   allowDirectHrVacancy: bool('ALLOW_DIRECT_HR_VACANCY', true),
   requisitionIdOn: env('REQUISITION_ID_ON', 'draft') as 'draft' | 'submit',
-  seedPassword: env('SEED_PASSWORD', 'Ars@2026!'),
+  seedPassword: env('SEED_PASSWORD'),
   /** Default "Send your CV to" address printed on generated hiring circulars. */
   careerEmail: env('CAREER_EMAIL', 'career@ananta.com.bd'),
 };

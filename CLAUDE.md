@@ -16,6 +16,7 @@ business rules, workflows, roles, permissions, architecture, database structure,
 
 - Do not invent requirements. If a requirement is unclear, ask the owner before implementing.
 - Do not commit or push unless the owner explicitly asks.
+- Never commit or push any env file, `.env.example` included, or anything sensitive: passwords, secrets, keys, database data or dumps, uploaded CVs. Credentials have no defaults in the code. Check the staged files before every commit.
 - Enforce permissions and data scope in the API, never only in the UI. New endpoints on vacancy-owned data need the guards in `backend/src/common/scope.ts`.
 - Keep the backend and frontend separate, with features directly under `backend/src/<feature>/`. Do not reintroduce `apps/` or npm workspaces.
 - Never edit an applied migration. Add a new one, named after the latest `17933000000NN` number.
