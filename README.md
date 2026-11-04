@@ -4,7 +4,7 @@ Connected web application implementing the end-to-end workflow in
 *Ananta_ARS_Consolidated_Detailed_SRS_v3.1_TechStack*:
 
 Department quota → Form No. 01 requisition → configurable named-approver chain → HR approved queue →
-vacancy → job post + versioned screening criteria → CV upload / intake → extraction → rule-based screening →
+vacancy → job post → CV upload / intake → extraction → rule-based screening →
 Excel summary → HR shortlist / override → individual invitation emails → attendance, written / interview / viva
 marks (incl. Excel import) → final HR decision → result / joining-letter email → HR-approved joining →
 Joined Candidate List.
@@ -20,27 +20,59 @@ Joined Candidate List.
 > NestJS 12 is ESM-only; this prototype uses the NestJS 11 (CommonJS) line so the TypeORM CLI, Jest and Nest
 > CLI work without ESM workarounds. Upgrading later is a mechanical change.
 
-## Quick start
+## Quick start (Windows / macOS / Linux, Node 20+)
 
-ARS development runs in Docker, and Docker PostgreSQL is the only development database. [DOCKER.md](DOCKER.md) has every command,
-the database configuration, and the steps for a new PC or for Ubuntu Server.
-
-```bash
-docker compose -f docker-compose.dev.yml up -d
-```
-
-Open http://localhost:3000. The web app proxies `/api/*` to the API.
-
-Backend and frontend are separate projects, each with its own `package.json` and `node_modules`. To get editor support and run
-type checks on this PC, install both from the repo root:
+Backend and frontend are separate projects, each with its own `package.json` and `node_modules`.
+Install both from the repo root:
 
 ```bash
 npm run setup
 ```
 
+1. **Configure.** Create `backend/.env` with your own values. Env files are never committed, and the API will not
+   start without the first two:
+
+   ```env
+   DATABASE_URL=postgres://ars:<database-password>@localhost:54329/ars
+   JWT_SECRET=<long-random-string>
+   SEED_PASSWORD=<password-for-seeded-users>
+   ```
+
+   Every other setting and its default is in `backend/src/config/index.ts`.
+
+2. **Database.** Either point `DATABASE_URL` at your PostgreSQL (database **must be UTF8**:
+   `CREATE DATABASE ars ENCODING 'UTF8' TEMPLATE template0;`), or start the bundled throwaway PostgreSQL
+   (real Postgres binaries, port 54329, data in `backend/.pgdata/`, password taken from `DATABASE_URL`):
+
+   ```bash
+   npm run db:local
+   ```
+
+3. **Migrate and seed** (seed is idempotent):
+
+   ```bash
+   npm run migrate
+   ```
+
+   ```bash
+   npm run seed
+   ```
+
+4. **Run** the API (port 4000) and web app (port 3000) in two terminals:
+
+   ```bash
+   npm run dev:api
+   ```
+
+   ```bash
+   npm run dev:web
+   ```
+
+   Open http://localhost:3000. The web app proxies `/api/*` to the API (`API_URL` in `frontend/.env.local`, default `http://localhost:4000`).
+
 ### Prototype accounts
 
-Seeded users were given the password in `SEED_PASSWORD` at the time they were seeded. **Change it before any shared demo.**
+All seeded users share the password in `SEED_PASSWORD` (`backend/.env`). **Change it before any shared demo.**
 
 | Email | Role |
 | --- | --- |
@@ -61,7 +93,7 @@ Seeded users were given the password in `SEED_PASSWORD` at the time they were se
 npm test
 ```
 
-Runs against the `ars_test` database on the Docker server, which must be created once (see [DOCKER.md](DOCKER.md); `TEST_DATABASE_URL` overrides it). `backend/test/rules.spec.ts` covers
+Runs against the `ars_test` database (`TEST_DATABASE_URL` overrides it). `backend/test/rules.spec.ts` covers
 screening, extraction, quota and form rules; `backend/test/workflow.e2e-spec.ts` drives the whole workflow
 through HTTP and asserts acceptance criteria **AC-01 … AC-27** (AC-28, backup/restore, is the manual procedure below).
 
@@ -75,7 +107,7 @@ through HTTP and asserts acceptance criteria **AC-01 … AC-27** (AC-28, backup/
 | ID formats | `REQ-YYYY-000001`, `VAC-…`, `JOB-…`, `CAND-000001`, `APP-…`, `IMP-…` | `ID_FORMAT_*` env vars |
 | Direct HR vacancy | Enabled, only with `vacancy.create_direct` permission, marked *Direct HR Entry*, reason required | `ALLOW_DIRECT_HR_VACANCY`, role permissions |
 | Revised quota | Stays a proposal; applied to the quota list only when Corporate HR sets *Inserted in quota chart? = Yes* after full approval | Corporate HR panel on the requisition |
-| Mailbox intake | **Not connected** (mailbox/protocol unconfirmed). Manual upload works; the Unmatched CVs queue and assignment flow are in place for when IMAP sync is added | — |
+| Mail intake | HR saves mails as `.eml` files, then chooses that folder on CV Bank → Unmatched CVs or uses the `backend/mail-inbox` folder, and scans. There is no live mailbox connection | `MAIL_INTAKE_DIR` |
 | CV formats / size | PDF, DOCX, DOC, TXT; 10 MB. DOC (legacy Word) and scanned PDFs are stored but marked *Failed* for manual review | `ALLOWED_CV_EXTENSIONS`, `MAX_UPLOAD_MB` |
 | CV extraction | Deterministic rules (`rules-1.0`); values only if literally present; GPA normalised only when on a /4 scale | `cv-extractor.ts` |
 | Duplicate detection | Same normalised email, same phone (last 10 digits) or identical file → *flagged*; HR chooses merge / keep separate. Never auto-merged | `detectDuplicate()` |
@@ -96,8 +128,21 @@ through HTTP and asserts acceptance criteria **AC-01 … AC-27** (AC-28, backup/
 
 ## Backup and restore (NFR-12 / AC-28)
 
-The database and the storage volume must be backed up **together** (documents are referenced by `storageKey`).
-The commands are in [DOCKER.md](DOCKER.md#backup-and-restore). Verify a restore with `GET /api/health`, then open a candidate's CV preview.
+The database and the storage folder must be backed up **together** (documents are referenced by `storageKey`).
+
+```bash
+pg_dump --format=custom --file=ars_backup.dump "$DATABASE_URL"
+```
+
+Then archive the storage folder (default `backend/storage/`) with the same timestamp.
+
+To restore into an empty UTF8 database, run `pg_restore`, then copy the storage archive back to `STORAGE_DIR`:
+
+```bash
+pg_restore --clean --if-exists --no-owner --dbname="$DATABASE_URL" ars_backup.dump
+```
+
+Verify with `GET /api/health`, then open a candidate's CV preview.
 
 ## Short user guide
 
@@ -130,7 +175,9 @@ The commands are in [DOCKER.md](DOCKER.md#backup-and-restore). Verify a restore 
   The *Hiring circular* card downloads a poster-style A4 PDF and a plain-text version, both generated from the saved
   details; drafts are marked "not yet published". Default CV address: `CAREER_EMAIL` in `backend/.env`. To check the
   layout without data: `npx ts-node scripts/sample-circular.ts <folder>` (in `backend/`).
-* **All CVs / Candidate CV Bank:** every application grouped department → vacancy → candidate, with search by name /
+* **Mail folder:** choose a folder of saved `.eml` mails and scan it. Each subject is matched to the circular's position and
+  department and the CV joins that vacancy; anything unclear waits in Unmatched CVs.
+* **All CVs / Candidate CV Bank:** separate pages for departments, then vacancies, then CVs, with a CV data Excel for each vacancy and search by name /
   Candidate ID / Application ID and a status filter. *Change* moves one application through the normal workflow
   (shortlist, interview, final decision, joining); other applications of the same candidate are not affected.
 * **Screening user:** candidate list and profile — correct extracted fields (audited) and add remarks.
@@ -163,8 +210,8 @@ backend/    NestJS API, its own package.json / node_modules
   src/common/            auth guard, permissions, scope checks, shared services
   src/config/            typed environment config (reads backend/.env)
   src/database/          entities, migrations, seed
-  scripts/ test/         retired local Postgres launcher, Jest tests
-  .pgdata/ storage/      old local data, retired and git-ignored (see DOCKER.md)
+  scripts/ test/         local Postgres launcher, Jest tests
+  .pgdata/ storage/ mail-inbox/  local DB data, uploaded files and saved CV mails (git-ignored)
 frontend/   Next.js app, its own package.json / node_modules
   src/app/(app)/*        screens
   src/components/ lib/   shared UI, API client, auth

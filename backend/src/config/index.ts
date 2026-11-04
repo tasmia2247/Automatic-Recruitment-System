@@ -23,6 +23,8 @@ export const config = {
   jwtSecret: required('JWT_SECRET'),
   jwtExpiresIn: env('JWT_EXPIRES_IN', '8h'),
   storageDir: path.resolve(BACKEND_DIR, env('STORAGE_DIR', './storage')),
+  /** HR saves CV mails here as .eml files; a scan reads them. */
+  mailIntakeDir: path.resolve(BACKEND_DIR, env('MAIL_INTAKE_DIR', './mail-inbox')),
   maxUploadBytes: Number(env('MAX_UPLOAD_MB', '10')) * 1024 * 1024,
   allowedCvExtensions: env('ALLOWED_CV_EXTENSIONS', 'pdf,docx,doc,txt').split(',').map((s) => s.trim().toLowerCase()),
   idFormats: {

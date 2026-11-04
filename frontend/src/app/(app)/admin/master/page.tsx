@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Alert, Badge, Button, Card, Input, Loaded, PageHeader, Table, Tabs, Td, useAction, useLoad } from '@/components/ui';
+import { Alert, Badge, Button, Card, ConfirmDialog, Input, Loaded, PageHeader, Table, Tabs, Td, useAction, useLoad } from '@/components/ui';
 import { api } from '@/lib/api';
 
 type Kind = 'companies' | 'departments' | 'positions';
@@ -11,6 +11,7 @@ export default function MasterDataPage() {
   const state = useLoad(() => api('/master/lookups'));
   const [draft, setDraft] = useState<{ code: string; name: string }>({ code: '', name: '' });
   const [editing, setEditing] = useState<any | null>(null);
+  const [removing, setRemoving] = useState<any | null>(null);
   const act = useAction();
 
   const add = async () => {
@@ -24,9 +25,16 @@ export default function MasterDataPage() {
     if (r) { setEditing(null); state.reload(); }
   };
 
+  const remove = async () => {
+    const r = await act.run(() => api(`/master/${tab}/${removing.id}`, { method: 'DELETE' }), 'Deleted.');
+    setRemoving(null);
+    if (r) state.reload();
+  };
+  const label = (row: any) => row.title ?? row.name;
+
   return (
     <>
-      <PageHeader title="Master data" subtitle="Controlled lists used across ARS. Deactivate instead of deleting so history stays intact." />
+      <PageHeader title="Master data" subtitle="Companies, departments and positions used across ARS. A record still used by requisitions, vacancies, quotas or users cannot be deleted; deactivate it instead." />
       <div className="mb-3 space-y-2"><Alert>{act.error}</Alert><Alert tone="success">{act.message}</Alert></div>
       <Tabs active={tab} onChange={(k) => { setTab(k as Kind); setEditing(null); }} tabs={[{ key: 'companies', label: 'Companies' }, { key: 'departments', label: 'Departments' }, { key: 'positions', label: 'Positions' }]} />
       <Card pad={false}>
@@ -48,7 +56,7 @@ export default function MasterDataPage() {
                     <Td>{e ? <label className="flex items-center gap-1 text-sm"><input type="checkbox" className="accent-brand-600" checked={e.active} onChange={(ev) => setEditing({ ...e, active: ev.target.checked })} /> Active</label>
                       : <Badge tone={row.active ? 'green' : 'slate'}>{row.active ? 'Active' : 'Inactive'}</Badge>}</Td>
                     <Td>{e ? <div className="flex gap-1"><Button size="sm" onClick={() => save(e)}>Save</Button><Button size="sm" variant="secondary" onClick={() => setEditing(null)}>Cancel</Button></div>
-                      : <Button size="sm" variant="secondary" onClick={() => setEditing({ ...row })}>Edit</Button>}</Td>
+                      : <div className="flex gap-1"><Button size="sm" variant="secondary" onClick={() => setEditing({ ...row })}>Edit</Button><Button size="sm" variant="danger" onClick={() => setRemoving(row)}>Delete</Button></div>}</Td>
                   </tr>
                 );
               })}
@@ -56,6 +64,9 @@ export default function MasterDataPage() {
           )}
         </Loaded>
       </Card>
+      <ConfirmDialog open={!!removing} danger title={`Delete ${removing ? label(removing) : ''}`} confirmLabel="Delete" busy={act.busy}
+        message="This removes it from the list for good. If anything still uses it, ARS refuses and says what, so you can deactivate it instead."
+        onConfirm={remove} onClose={() => setRemoving(null)} />
     </>
   );
 }

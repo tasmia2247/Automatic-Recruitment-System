@@ -1,4 +1,4 @@
-import { fmtDate, fmtDateTime, show } from '@/lib/api';
+import { approvalStep, fmtDate, fmtDateTime, show } from '@/lib/api';
 
 const yn = (v: boolean | null | undefined) => (v === null || v === undefined ? '—' : v ? 'Yes' : 'No');
 
@@ -17,13 +17,14 @@ export function FormView({ r }: { r: any }) {
   const sign = (label: string) => r.approvals.find((a: any) => a.version === latest && a.stepLabel === label);
   const SignBox = ({ label }: { label: string }) => {
     const a = sign(label);
+    const s = a ? approvalStep(a, r.approvals) : null;
     return (
       <div className="rounded border border-line p-2 text-xs">
         <div className="font-semibold">{label}</div>
-        <div className="mt-1">Decision: <b>{a ? a.status : 'Not in route'}</b>{a?.carriedOver ? ' (carried forward)' : ''}</div>
+        <div className="mt-1">Decision: <b>{s ? s.status : 'Not in route'}</b>{a?.carriedOver ? ' (carried forward)' : ''}</div>
         <div>Name: {a?.approver.name ?? '—'}</div>
-        <div>Date: {a?.decidedAt ? fmtDateTime(a.decidedAt) : '—'}</div>
-        {a?.remarks && <div className="mt-1 italic">“{a.remarks}”</div>}
+        <div>Date: {s?.decidedAt ? fmtDateTime(s.decidedAt) : '—'}</div>
+        {s?.note && <div className="mt-1 italic">“{s.note}”</div>}
       </div>
     );
   };

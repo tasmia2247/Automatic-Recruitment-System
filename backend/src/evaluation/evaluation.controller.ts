@@ -11,7 +11,7 @@ import { P } from '../common/permissions';
 import { assertApplicationAccess, assertApplicationsAccess, assertImportAccess, assertVacancyAccess } from '../common/scope';
 import { STAGE_TYPES, StageType } from '../database/entities';
 import { EvaluationService } from './evaluation.service';
-import { ConfirmDto, DecisionDto, ImportQuery, MarkDto, ScheduleDto, StageDto } from './evaluation.dto';
+import { ConfirmDto, DecisionDto, ImportQuery, InterviewBoardQuery, MarkDto, ScheduleDto, StageDto } from './evaluation.dto';
 
 @Controller()
 export class EvaluationController {
@@ -30,7 +30,22 @@ export class EvaluationController {
   async schedule(@Param('id', ParseUUIDPipe) id: string, @Body() dto: ScheduleDto, @CurrentUser() me: AuthUser) {
     await assertVacancyAccess(this.ds, me, id);
     await assertApplicationsAccess(this.ds, me, dto.applicationIds);
-    return this.svc.schedule(id, dto.applicationIds, dto.stageType, dto.scheduledAt, dto.location, me);
+    return this.svc.schedule(id, dto.applicationIds, dto.stageType, dto.scheduledAt, dto, me);
+  }
+
+  /** Interview Board: shortlisted candidates of every vacancy the user may see, with their rounds. */
+  @Get('interviews/board')
+  @RequirePerm(P.CANDIDATE_VIEW)
+  interviewBoard(@Query() q: InterviewBoardQuery, @CurrentUser() me: AuthUser) {
+    return this.svc.interviewBoard(q, me);
+  }
+
+  @Post('interviews/schedule')
+  @HttpCode(200)
+  @RequirePerm(P.SHORTLIST)
+  async scheduleAny(@Body() dto: ScheduleDto, @CurrentUser() me: AuthUser) {
+    await assertApplicationsAccess(this.ds, me, dto.applicationIds);
+    return this.svc.schedule(null, dto.applicationIds, dto.stageType, dto.scheduledAt, dto, me);
   }
 
   @Put('applications/:id/stages/:stage')

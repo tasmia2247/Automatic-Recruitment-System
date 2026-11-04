@@ -40,6 +40,10 @@ export class Vacancy extends BaseEntity {
   @Column({ type: 'varchar', length: 200, nullable: true }) replacementEmployee: string | null;
   /** Mandatory reason for a Direct HR Entry vacancy. */
   @Column({ type: 'text', nullable: true }) directReason: string | null;
+  /** Direct HR vacancies only: what CVs are screened against (requisition vacancies use the requisition's). */
+  @Column({ type: 'text', nullable: true }) specialization: string | null;
+  /** Goes up whenever `specialization` changes; screening runs record it. */
+  @Column({ type: 'int', default: 0 }) specializationVersion: number;
 
   @Index()
   @Column({ type: 'varchar', length: 20, default: 'Open' })
@@ -102,10 +106,10 @@ export class JobPost extends BaseEntity {
 
 export const CRITERION_FIELDS = [
   'degree', 'education', 'institution', 'cgpa', 'totalExperienceYears', 'relevantExperienceYears',
-  'skills', 'expectedSalary', 'age',
+  'skills', 'expectedSalary', 'age', 'cvText',
 ] as const;
 export type CriterionField = (typeof CRITERION_FIELDS)[number];
-export const CRITERION_OPERATORS = ['gte', 'lte', 'eq', 'contains_any', 'contains_all'] as const;
+export const CRITERION_OPERATORS = ['gte', 'lte', 'eq', 'contains_any', 'contains_all', 'mentions'] as const;
 export type CriterionOperator = (typeof CRITERION_OPERATORS)[number];
 
 /** Immutable, versioned set of criteria for a job post (SRS 8.6 / AC-16). */
@@ -188,13 +192,19 @@ export class Application extends BaseEntity {
   // ---- Extracted / corrected CV fields (never fabricated; null = missing) ----
   @Column({ type: 'text', nullable: true }) education: string | null;
   @Column({ type: 'text', nullable: true }) degree: string | null;
+  @Column({ type: 'text', nullable: true }) specialization: string | null;
   @Column({ type: 'text', nullable: true }) institution: string | null;
   @Column({ type: 'varchar', length: 40, nullable: true }) cgpaRaw: string | null;
   @Column({ type: 'numeric', precision: 4, scale: 2, nullable: true, transformer: numeric }) cgpa: number | null;
   @Column({ type: 'numeric', precision: 4, scale: 1, nullable: true, transformer: numeric }) totalExperienceYears: number | null;
   @Column({ type: 'numeric', precision: 4, scale: 1, nullable: true, transformer: numeric }) relevantExperienceYears: number | null;
+  @Column({ type: 'text', nullable: true }) lastPosition: string | null;
   @Column({ type: 'text', nullable: true }) workplace: string | null;
   @Column({ type: 'text', nullable: true }) skills: string | null;
+  @Column({ type: 'text', nullable: true }) address: string | null;
+  @Column({ type: 'text', nullable: true }) certifications: string | null;
+  /** Earlier jobs as "Designation, Organization", one per line. */
+  @Column({ type: 'text', nullable: true }) previousJobs: string | null;
   @Column({ type: 'varchar', length: 60, nullable: true }) expectedSalary: string | null;
   @Column({ type: 'int', nullable: true }) age: number | null;
   @Column({ type: 'varchar', length: 20, nullable: true }) extractionStatus: 'Success' | 'Partial' | 'Failed' | 'Review Required' | null;
@@ -259,7 +269,10 @@ export interface CriterionResult {
 @Entity('screening_runs')
 export class ScreeningRun extends BaseEntity {
   @Index() @Column('uuid') applicationId: string;
-  @Column('uuid') criteriaSetId: string;
+  /** JOB_POST: an older run against job post criteria. REQUISITION / VACANCY: the requisition's or Direct HR vacancy's "Specialization required", no criteria set. */
+  @Column({ type: 'varchar', length: 20, default: 'JOB_POST' }) basis: 'JOB_POST' | 'REQUISITION' | 'VACANCY';
+  @Column({ type: 'uuid', nullable: true }) criteriaSetId: string | null;
+  /** Criteria set version; the requisition version for REQUISITION runs; the vacancy's specializationVersion for VACANCY runs. */
   @Column('int') criteriaVersion: number;
   @Column({ type: 'varchar', length: 20 }) overallResult: ScreeningResult;
   @Column({ type: 'jsonb' }) results: CriterionResult[];
@@ -276,7 +289,8 @@ export class CandidateRemark extends BaseEntity {
   @ManyToOne(() => User) @JoinColumn({ name: 'authorId' }) author: User;
 }
 
-export const STAGE_TYPES = ['WRITTEN', 'INTERVIEW', 'VIVA'] as const;
+/** Written exam and Interview board (viva) are held together on one day for every shortlisted candidate; the Optional exam only when used. */
+export const STAGE_TYPES = ['WRITTEN', 'INTERVIEW', 'OPTIONAL'] as const;
 export type StageType = (typeof STAGE_TYPES)[number];
 
 @Entity('candidate_stages')
@@ -286,6 +300,9 @@ export class CandidateStage extends BaseEntity {
   @Column({ type: 'varchar', length: 20 }) stageType: StageType;
   @Column({ type: 'timestamptz', nullable: true }) scheduledAt: Date | null;
   @Column({ type: 'varchar', length: 200, nullable: true }) location: string | null;
+  /** Interview panel members, free text. */
+  @Column({ type: 'text', nullable: true }) panel: string | null;
+  @Column({ type: 'int', nullable: true }) durationMinutes: number | null;
   /** Missing attendance is "Not Recorded", never assumed Present (SRS 13.3). */
   @Column({ type: 'varchar', length: 20, default: 'Not Recorded' }) attendance: 'Present' | 'Absent' | 'Not Recorded';
   @Column({ type: 'varchar', length: 20, default: 'Pending' }) result: DecisionStatus;
@@ -408,14 +425,14 @@ export class JoiningRecord extends BaseEntity {
   @Index({ unique: true }) @Column('uuid') applicationId: string;
   @ManyToOne(() => Application) @JoinColumn({ name: 'applicationId' }) application: Application;
   @Column({ type: 'date', nullable: true }) joiningDate: string | null;
-  @Index() @Column({ type: 'varchar', length: 20, default: 'Pending' }) status: 'Pending' | 'Approved' | 'Did Not Join';
+  @Index() @Column({ type: 'varchar', length: 20, default: 'Pending' }) status: 'Pending' | 'Approved' | 'Rejected';
   @Column({ type: 'varchar', length: 20, default: 'Not Prepared' }) letterStatus: 'Not Prepared' | 'Prepared' | 'Sent';
   @Column({ type: 'text', nullable: true }) remarks: string | null;
   @Column({ type: 'uuid', nullable: true }) approvedById: string | null;
   @Column({ type: 'timestamptz', nullable: true }) approvedAt: Date | null;
 }
 
-/** Email intake items (mailbox sync); unmatched ones wait for manual assignment. */
+/** Mails read from the mail folder; unmatched ones wait for manual assignment. */
 @Entity('intake_messages')
 export class IntakeMessage extends BaseEntity {
   @Index({ unique: true }) @Column({ length: 300 }) messageId: string;

@@ -1,10 +1,10 @@
 import { Type } from 'class-transformer';
 import {
-  IsArray, IsBoolean, IsDateString, IsEmail, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Length, Max, MaxLength, Min, MinLength, ValidateIf, ValidateNested,
+  IsDateString, IsEmail, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Length, Max, MaxLength, Min, MinLength, ValidateIf,
 } from 'class-validator';
 import { ListQuery } from '../common/pagination';
 import {
-  CRITERION_FIELDS, CRITERION_OPERATORS, JOBPOST_STATUSES, JobPost, ScreeningCriterion, VACANCY_STATUSES, Vacancy,
+  JOBPOST_STATUSES, JobPost, VACANCY_STATUSES, Vacancy,
 } from '../database/entities';
 
 export class HrQueueQuery extends ListQuery {
@@ -32,6 +32,8 @@ export class DirectVacancyDto {
   @IsIn(['NEW', 'REPLACEMENT']) vacancyType: 'NEW' | 'REPLACEMENT';
   @IsOptional() @IsString() replacementEmployee?: string;
   @IsString() @MinLength(5, { message: 'A reason is required for a Direct HR Entry vacancy.' }) directReason: string;
+  /** What CVs are screened against: comma-separated items that must be written in the CV. */
+  @IsOptional() @IsString() specialization?: string | null;
   @IsOptional() @IsString() remarks?: string;
   /** Optional HR coordinator; needs hr.assign_coordinator. Left out = Unassigned. */
   @IsOptional() @IsUUID() coordinatorId?: string | null;
@@ -40,6 +42,8 @@ export class DirectVacancyDto {
 export class VacancyUpdateDto {
   @IsOptional() @IsIn(VACANCY_STATUSES as unknown as string[]) status?: Vacancy['status'];
   @IsOptional() @IsString() remarks?: string;
+  /** Direct HR vacancies only; a requisition vacancy uses its approved requisition's. */
+  @IsOptional() @IsString() specialization?: string | null;
 }
 
 export class JobPostDto {
@@ -70,18 +74,4 @@ export class CircularFileQuery {
 
 export class JobPostStatusDto {
   @IsIn(JOBPOST_STATUSES as unknown as string[]) status: JobPost['status'];
-}
-
-export class CriterionDto {
-  @IsString() @Length(1, 120) label: string;
-  @IsIn(CRITERION_FIELDS as unknown as string[]) field: ScreeningCriterion['field'];
-  @IsIn(CRITERION_OPERATORS as unknown as string[]) operator: ScreeningCriterion['operator'];
-  @IsString() @MinLength(1) value: string;
-  @IsBoolean() mandatory: boolean;
-  @IsIn(['REVIEW', 'FAIL', 'IGNORE']) missingPolicy: 'REVIEW' | 'FAIL' | 'IGNORE';
-}
-
-export class CriteriaSetDto {
-  @IsArray() @ValidateNested({ each: true }) @Type(() => CriterionDto) criteria: CriterionDto[];
-  @IsOptional() @IsString() @MaxLength(500) note?: string;
 }

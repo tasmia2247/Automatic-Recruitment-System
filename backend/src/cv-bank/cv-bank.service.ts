@@ -15,6 +15,7 @@ import { ApplicationStatus, CvBankQuery, StatusChangeDto } from './cv-bank.dto';
 /** Single SQL definition of the derived status. Needs aliases `a` (applications) and `j` (joining_records, LEFT JOIN). */
 export const STATUS_SQL = `(CASE
   WHEN j.status = 'Approved' THEN 'Joined'
+  WHEN j.status = 'Rejected' THEN 'Rejected'
   WHEN a."finalDecision" <> 'Pending' THEN a."finalDecision"
   WHEN EXISTS (SELECT 1 FROM candidate_stages s WHERE s."applicationId" = a.id) THEN 'Interview'
   WHEN a.shortlisted THEN 'Shortlisted'
@@ -36,6 +37,7 @@ export const TRANSITIONS: Record<ApplicationStatus, ApplicationStatus[]> = {
   Selected: ['Joined', 'Not Selected', 'On Hold'],
   'Not Selected': ['Selected', 'On Hold'],
   Joined: [],
+  Rejected: [], // reopened from the Joining page only
 };
 
 export interface StatusRow { status: ApplicationStatus; screeningResult: string | null }
@@ -146,7 +148,7 @@ export class CvBankService {
                 ${STATUS_SQL} AS status,
                 doc.id AS "documentId", doc."originalName" AS "documentName",
                 (SELECT count(*)::int FROM jsonb_array_elements(sr.results) e WHERE e->>'outcome' = 'Pass') AS "criteriaMet",
-                jsonb_array_length(sr.results) AS "criteriaTotal", sr."criteriaVersion",
+                jsonb_array_length(sr.results) AS "criteriaTotal", sr."criteriaVersion", sr.basis AS "screeningBasis",
                 rm.text AS "latestRemark", coalesce(rm.n, 0)::int AS "remarkCount",
                 GREATEST(a."updatedAt", stg.t, j."updatedAt", rm."createdAt") AS "lastUpdated"
          ${from}

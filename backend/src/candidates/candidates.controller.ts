@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Res, UploadedFiles, UseInterceptors,
+  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Res, UploadedFiles, UseInterceptors,
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
@@ -11,10 +11,11 @@ import { P } from '../common/permissions';
 import { assertApplicationAccess, assertApplicationsAccess, assertDocumentAccess, assertVacancyAccess } from '../common/scope';
 import { CandidatesService } from './candidates.service';
 import { ApplicationListQuery, AssignDto, CorrectionDto, DocumentQuery, DuplicateDto, ExportQuery, RemarkDto, ShortlistDto } from './candidates.dto';
+import { MAX_MAIL_BYTES, MAX_MAILS_PER_UPLOAD, MailIntakeService } from './mail-intake.service';
 
 @Controller()
 export class CandidatesController {
-  constructor(private readonly svc: CandidatesService, @InjectDataSource() private readonly ds: DataSource) {}
+  constructor(private readonly svc: CandidatesService, private readonly mail: MailIntakeService, @InjectDataSource() private readonly ds: DataSource) {}
 
   @Post('vacancies/:id/cvs')
   @RequirePerm(P.CV_UPLOAD)
@@ -53,6 +54,24 @@ export class CandidatesController {
   async export(@Param('id', ParseUUIDPipe) id: string, @Query() q: ExportQuery, @CurrentUser() me: AuthUser, @Res() res: Response) {
     await assertVacancyAccess(this.ds, me, id);
     const { fileName, buffer } = await this.svc.exportVacancy(id, q.result, me);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(buffer);
+  }
+
+  /** The CV data sheet as rows, for viewing it in the browser. */
+  @Get('vacancies/:id/cv-data')
+  @RequirePerm(P.CANDIDATE_VIEW)
+  async cvData(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
+    await assertVacancyAccess(this.ds, me, id);
+    return this.svc.cvData(id);
+  }
+
+  @Get('vacancies/:id/cv-data-export')
+  @RequirePerm(P.EXPORT)
+  async cvDataExport(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser, @Res() res: Response) {
+    await assertVacancyAccess(this.ds, me, id);
+    const { fileName, buffer } = await this.svc.exportCvData(id, me);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.send(buffer);
@@ -109,6 +128,27 @@ export class CandidatesController {
     res.send(buffer);
   }
 
+  @Get('intake/mail-folder')
+  @RequirePerm(P.CV_UPLOAD, P.RECRUITMENT_ALL)
+  mailFolder() {
+    return this.mail.folder();
+  }
+
+  @Post('intake/scan')
+  @HttpCode(200)
+  @RequirePerm(P.CV_UPLOAD, P.RECRUITMENT_ALL)
+  scan(@CurrentUser() me: AuthUser) {
+    return this.mail.scanFolder(me);
+  }
+
+  @Post('intake/scan-files')
+  @HttpCode(200)
+  @RequirePerm(P.CV_UPLOAD, P.RECRUITMENT_ALL)
+  @UseInterceptors(FilesInterceptor('files', MAX_MAILS_PER_UPLOAD, { limits: { fileSize: MAX_MAIL_BYTES } }))
+  scanFiles(@UploadedFiles() files: Express.Multer.File[], @CurrentUser() me: AuthUser) {
+    return this.mail.scanFiles(files, me);
+  }
+
   @Get('intake/unmatched')
   @RequirePerm(P.CV_UPLOAD, P.RECRUITMENT_ALL)
   unmatched() {
@@ -120,5 +160,11 @@ export class CandidatesController {
   @RequirePerm(P.CV_UPLOAD, P.RECRUITMENT_ALL)
   assign(@Param('id', ParseUUIDPipe) id: string, @Body() dto: AssignDto, @CurrentUser() me: AuthUser) {
     return this.svc.assignUnmatched(id, dto.vacancyId, me);
+  }
+
+  @Delete('intake/:id')
+  @RequirePerm(P.CV_UPLOAD, P.RECRUITMENT_ALL)
+  deleteUnmatched(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
+    return this.svc.deleteUnmatched(id, me);
   }
 }

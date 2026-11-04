@@ -60,7 +60,7 @@ export const PERMISSION_MATRIX: MatrixModule[] = [
   {
     key: 'recruitment', label: 'Vacancies & Job Posts',
     actions: { view: [P.VACANCY_VIEW], create: [P.VACANCY_DIRECT], edit: [P.VACANCY_EDIT], manage: [P.RECRUITMENT_ALL] },
-    extras: [{ code: P.JOBPOST_EDIT, label: 'Job posts, circulars & screening criteria' }],
+    extras: [{ code: P.JOBPOST_EDIT, label: 'Job posts & circulars' }],
   },
   {
     key: 'candidates', label: 'Candidates (CV Bank)',
@@ -71,7 +71,7 @@ export const PERMISSION_MATRIX: MatrixModule[] = [
     ],
   },
   {
-    key: 'interviews', label: 'Interviews / Exam / Viva',
+    key: 'interviews', label: 'Interview Board / Exams',
     actions: { edit: [P.MARKS_ENTER], create: [P.MARKS_IMPORT], approve: [P.FINAL_DECISION], manage: [P.MARKS_OVERWRITE] },
     extras: [{ code: P.ATTENDANCE, label: 'Record attendance' }],
   },

@@ -101,7 +101,7 @@ const STATUS_TONE: Record<string, string> = {
   Received: 'slate', Unmatched: 'orange', Queued: 'slate', Processing: 'blue', Completed: 'green', Partial: 'amber', Failed: 'red',
   Pass: 'green', Fail: 'red', 'Review Required': 'amber', Success: 'green', 'Not screened': 'slate',
   // decisions / email / joining
-  Shortlisted: 'violet', Interview: 'blue', Joined: 'green', Selected: 'green', 'Not Selected': 'red', Sent: 'green', Skipped: 'orange', 'Did Not Join': 'red', 'Not Recorded': 'slate', Present: 'green', Absent: 'red',
+  Shortlisted: 'violet', Interview: 'blue', Joined: 'green', Selected: 'green', 'Not Selected': 'red', Sent: 'green', Skipped: 'orange', 'Not Recorded': 'slate', Present: 'green', Absent: 'red',
   PENDING: 'amber', MERGED: 'green', SEPARATE: 'slate', DIRECT_HR: 'violet', REQUISITION: 'blue',
 };
 const TONES: Record<string, string> = {

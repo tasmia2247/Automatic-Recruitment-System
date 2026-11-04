@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Alert, Badge, Button, Card, Field, Input, Loaded, PageHeader, Select, Table, Td, Textarea, useAction, useLoad } from '@/components/ui';
+import { Alert, Badge, Button, Card, ConfirmDialog, Field, Input, Loaded, PageHeader, Select, Table, Td, Textarea, useAction, useLoad } from '@/components/ui';
 import { api, fmtDateTime } from '@/lib/api';
 
 const KINDS = [['INTERVIEW_INVITE', 'Interview invitation'], ['RESULT', 'Result / confirmation'], ['JOINING_LETTER', 'Joining letter'], ['GENERAL', 'General']];
@@ -10,11 +10,17 @@ export default function TemplatesPage() {
   const state = useLoad(() => api('/email/templates'));
   const meta = useLoad(() => api('/email/placeholders'));
   const [edit, setEdit] = useState<any | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const act = useAction();
   const save = async () => {
     const body = { name: edit.name, kind: edit.kind, subject: edit.subject, body: edit.body, active: edit.active ?? true };
     const r = await act.run(() => (edit.id ? api(`/email/templates/${edit.id}`, { method: 'PUT', body }) : api('/email/templates', { body })), (t: any) => `Saved (version ${t.version}).`);
     if (r) { setEdit(r); state.reload(); }
+  };
+  const remove = async () => {
+    const r = await act.run(() => api(`/email/templates/${edit.id}`, { method: 'DELETE' }), 'Template deleted. Emails already sent keep their text.');
+    setConfirmDelete(false);
+    if (r) { setEdit(null); state.reload(); }
   };
   return (
     <>
@@ -51,11 +57,14 @@ export default function TemplatesPage() {
               </Field>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="accent-brand-600" checked={edit.active ?? true} onChange={(e) => setEdit({ ...edit, active: e.target.checked })} /> Active</label>
               <Alert>{act.error}</Alert><Alert tone="success">{act.message}</Alert>
-              <div className="flex justify-end gap-2"><Button variant="secondary" onClick={() => setEdit(null)}>Close</Button><Button busy={act.busy} onClick={save}>Save</Button></div>
+              <div className="flex justify-end gap-2">{edit.id && <Button variant="danger" className="mr-auto" onClick={() => setConfirmDelete(true)}>Delete</Button>}<Button variant="secondary" onClick={() => setEdit(null)}>Close</Button><Button busy={act.busy} onClick={save}>Save</Button></div>
             </div>
           ) : <p className="text-sm text-muted">Choose a template on the left or create a new one.</p>}
         </Card>
       </div>
+      <ConfirmDialog open={confirmDelete} danger title={`Delete template ${edit?.name ?? ''}`} confirmLabel="Delete" busy={act.busy}
+        message="The template and all its versions are removed for good. Emails already sent keep their own subject and text."
+        onConfirm={remove} onClose={() => setConfirmDelete(false)} />
     </>
   );
 }

@@ -24,6 +24,9 @@ const lines = (s?: string | null) =>
   (s ?? '').split(/\r?\n/).map((l) => l.replace(/^\s*(?:[-*•●▪]|\d+[.)])\s*/, '').trim()).filter(Boolean);
 const fmtDate = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric', timeZone: 'UTC' });
 
+const defaultSubject = (title: string, department: string) =>
+  (title.toLowerCase().includes(department.toLowerCase()) ? `Application for ${title}` : `Application for ${title} - ${department}`);
+
 export function buildCircular(jp: JobPost, v: Vacancy & { department: { name: string }; company: { name: string } }): Circular {
   const facts: [string, string][] = [
     ['Company', v.company.name],
@@ -47,8 +50,8 @@ export function buildCircular(jp: JobPost, v: Vacancy & { department: { name: st
     responsibilities: lines(jp.duties), skills: lines(jp.skills), education,
     deadline: jp.deadline ? fmtDate(jp.deadline) : null,
     applyEmail: jp.applyEmail || config.careerEmail,
-    // The job ID in the subject lets email intake route the CV to this job post.
-    emailSubject: jp.emailSubject?.includes(jp.jobNo) ? jp.emailSubject : `${jp.emailSubject || `Application for ${jp.title}`} (${jp.jobNo})`,
+    // The mail scan routes a CV by the position and department in the subject; the job ID separates identical jobs.
+    emailSubject: jp.emailSubject?.includes(jp.jobNo) ? jp.emailSubject : `${jp.emailSubject || defaultSubject(jp.title, v.department.name)} (${jp.jobNo})`,
     draft: jp.status === 'Draft',
   };
 }

@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, Controller, Get, NotFoundException, Param, Patch, Post, Query,
+  BadRequestException, Body, ConflictException, Controller, Delete, Get, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Query,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In, IsNull } from 'typeorm';
@@ -11,6 +11,19 @@ import { Company, Department, ManpowerQuota, Position } from '../database/entiti
 import { MasterDto, MasterUpdateDto, PositionDto, QuotaDto, QuotaQuery, QuotaUpdateDto } from './master.dto';
 
 export const MASTER = { companies: Company, departments: Department } as const;
+
+const count = (table: string, column: string) => `SELECT count(*)::int AS n FROM ${table} WHERE "${column}" = $1`;
+/** Everything that refers to a master record; any of these blocks a delete. Access scopes keep department IDs inside JSON. */
+const IN_USE: Record<'companies' | 'departments' | 'positions', [string, string][]> = {
+  companies: [['requisition(s)', count('requisitions', 'companyId')], ['vacancy(ies)', count('vacancies', 'companyId')], ['quota row(s)', count('manpower_quotas', 'companyId')]],
+  departments: [
+    ['requisition(s)', count('requisitions', 'departmentId')], ['vacancy(ies)', count('vacancies', 'departmentId')], ['quota row(s)', count('manpower_quotas', 'departmentId')],
+    ['user(s)', `SELECT count(*)::int AS n FROM users WHERE "departmentId" = $1 OR "departmentScopes"::text LIKE '%' || $1::text || '%'`],
+    ['approval route(s)', count('approval_routes', 'departmentId')],
+    ['permission template(s)', `SELECT count(*)::int AS n FROM permission_templates WHERE "departmentScopes"::text LIKE '%' || $1::text || '%'`],
+  ],
+  positions: [['requisition(s)', count('requisitions', 'positionId')], ['vacancy(ies)', count('vacancies', 'positionId')], ['quota row(s)', count('manpower_quotas', 'positionId')]],
+};
 
 @Controller('master')
 export class MasterController {
@@ -70,6 +83,45 @@ export class MasterController {
       await m.save(rec);
       await this.audit.log(m, me, `${kind}.update`, Entity.name, rec.id, { label: rec.code, ...d });
       return rec;
+    });
+  }
+
+  @Delete('companies/:id')
+  @RequirePerm(P.MASTER_CONFIGURE)
+  deleteCompany(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
+    return this.deleteMaster('companies', id, me);
+  }
+
+  @Delete('departments/:id')
+  @RequirePerm(P.MASTER_CONFIGURE)
+  deleteDepartment(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
+    return this.deleteMaster('departments', id, me);
+  }
+
+  @Delete('positions/:id')
+  @RequirePerm(P.MASTER_CONFIGURE)
+  deletePosition(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
+    return this.deleteMaster('positions', id, me);
+  }
+
+  /**
+   * Deletes a company, department or position only while nothing uses it (owner, 2026-11-04); otherwise 409 names what
+   * uses it, so history is never broken. Deactivating stays the way to retire a record that is in use.
+   */
+  private async deleteMaster(kind: keyof typeof IN_USE, id: string, me: AuthUser) {
+    return this.ds.transaction(async (m) => {
+      const Entity = { ...MASTER, positions: Position }[kind];
+      const rec: any = await m.findOne(Entity as any, { where: { id } });
+      if (!rec) throw new NotFoundException();
+      const uses: string[] = [];
+      for (const [label, sql] of IN_USE[kind]) {
+        const [{ n }] = await m.query(sql, [id]);
+        if (n) uses.push(`${n} ${label}`);
+      }
+      if (uses.length) throw new ConflictException(`In use by ${uses.join(', ')}. Deactivate it instead, or remove those uses first.`);
+      await m.delete(Entity as any, id);
+      await this.audit.log(m, me, `${kind}.delete`, (Entity as any).name, id, { label: rec.code ?? rec.title, old: { code: rec.code, name: rec.name ?? rec.title } });
+      return { deleted: true };
     });
   }
 

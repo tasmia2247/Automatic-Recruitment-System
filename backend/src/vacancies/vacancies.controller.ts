@@ -6,7 +6,7 @@ import type { Response } from 'express';
 import { config } from '../config';
 import { AuthUser, CurrentUser, RequirePerm } from '../common/auth';
 import { P } from '../common/permissions';
-import { CircularFileQuery, CoordinatorDto, CriteriaSetDto, DirectVacancyDto, HrQueueQuery, JobPostDto, JobPostStatusDto, VacancyListQuery, VacancyUpdateDto } from './vacancies.dto';
+import { CircularFileQuery, CoordinatorDto, DirectVacancyDto, HrQueueQuery, JobPostDto, JobPostStatusDto, VacancyListQuery, VacancyUpdateDto } from './vacancies.dto';
 import { VacancyService } from './vacancies.service';
 
 @Controller()
@@ -91,12 +91,6 @@ export class VacanciesController {
   @RequirePerm(P.JOBPOST_EDIT)
   setStatus(@Param('id', ParseUUIDPipe) id: string, @Body() dto: JobPostStatusDto, @CurrentUser() me: AuthUser) {
     return this.svc.setJobPostStatus(id, dto.status, me);
-  }
-
-  @Post('job-posts/:id/criteria')
-  @RequirePerm(P.JOBPOST_EDIT)
-  saveCriteria(@Param('id', ParseUUIDPipe) id: string, @Body() dto: CriteriaSetDto, @CurrentUser() me: AuthUser) {
-    return this.svc.saveCriteria(id, dto, me);
   }
 
   @Post('job-posts/:id/circular')

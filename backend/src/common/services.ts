@@ -106,6 +106,11 @@ export class StorageService {
     return fs.readFileSync(full);
   }
 
+  /** Erases a stored file; a file that is already gone is not an error. */
+  remove(storageKey: string) {
+    fs.rmSync(this.resolve(storageKey), { force: true });
+  }
+
   resolve(storageKey: string) {
     const full = path.resolve(config.storageDir, storageKey);
     if (!full.startsWith(path.resolve(config.storageDir))) throw new BadRequestException('Invalid storage key.');

@@ -4,9 +4,8 @@ import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useState } from 'react';
 import { CandidatesTab } from '@/components/vacancy/CandidatesTab';
-import { EvaluationTab } from '@/components/vacancy/EvaluationTab';
 import { CoordinatorSelect } from '@/components/vacancy/CoordinatorSelect';
-import { Alert, Badge, Button, Card, DL, Field, Input, Loaded, Modal, PageHeader, Select, Table, Tabs, Td, useAction, useLoad } from '@/components/ui';
+import { Alert, Badge, Button, Card, DL, Field, Input, Loaded, Modal, PageHeader, Select, Table, Tabs, Td, Textarea, useAction, useLoad } from '@/components/ui';
 import { api, download, fmtDate, fmtDateTime, show } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
@@ -47,12 +46,14 @@ function Workspace() {
   const state = useLoad(() => api(`/vacancies/${id}`), [id]);
   const coordinators = useLoad(() => (can(P.COORDINATOR_ASSIGN) ? api('/hr-queue/coordinators') : Promise.resolve(null)), [can]);
   const [newPost, setNewPost] = useState<any | null>(null);
+  const [spec, setSpec] = useState<string | null>(null);
   const act = useAction();
 
   const createPost = async () => {
     const r = await act.run(() => api(`/vacancies/${id}/job-posts`, { body: { title: newPost.title, startDate: newPost.startDate || undefined, deadline: newPost.deadline || undefined } }));
     if (r) router.push(`/job-posts/${r.id}`);
   };
+  const saveSpec = () => act.run(() => api(`/vacancies/${id}`, { method: 'PUT', body: { specialization: spec } }), 'Specialization required saved. Use Re-run screening on the Candidates tab to apply it to CVs already received.').then((r) => { if (r) { setSpec(null); state.reload(); } });
   const setStatus = (status: string) => act.run(() => api(`/vacancies/${id}`, { method: 'PUT', body: { status } }), `Vacancy status set to ${status}.`).then(state.reload);
 
   return (
@@ -68,12 +69,13 @@ function Workspace() {
           <div className="mb-3 space-y-2"><Alert>{act.error}</Alert><Alert tone="success">{act.message}</Alert></div>
           <Tabs active={tab} onChange={setTab} tabs={[
             { key: 'overview', label: 'Overview & job posts' }, { key: 'candidates', label: 'Candidates & screening' },
-            { key: 'evaluation', label: 'Interview / exam / results' }, { key: 'emails', label: 'Emails' },
+            { key: 'emails', label: 'Emails' },
           ]} />
           {tab === 'overview' && (
             <div className="grid gap-4 lg:grid-cols-3">
               <Card title="Vacancy">
                 <DL items={[
+                  ['Attached company', <span key="co">{v.company.name} <span className="text-muted">({v.company.code})</span>{v.source !== 'DIRECT_HR' && <span className="block text-xs text-muted">From the requisition</span>}</span>],
                   ['Source', v.source === 'DIRECT_HR' ? 'Direct HR Entry' : <Link className="text-brand-700 hover:underline" href={`/requisitions/${v.requisition?.id}`}>{v.requisition?.reqNo}</Link>],
                   ['Type', v.vacancyType === 'REPLACEMENT' ? `Replacement${v.replacementEmployee ? ` — ${v.replacementEmployee}` : ''}` : 'New position'],
                   ['Coordinator', can(P.COORDINATOR_ASSIGN) && coordinators.data
@@ -81,12 +83,21 @@ function Workspace() {
                     : v.coordinator?.name ?? <Badge tone="amber">Unassigned</Badge>],
                   ['Approved headcount', v.headcount], ['Created', fmtDate(v.createdAt)],
                   ...(v.directReason ? [['Direct entry reason', v.directReason] as [string, string]] : []),
+                  ...(v.source === 'DIRECT_HR' ? [['Specialization required', spec !== null ? (
+                    <div className="space-y-2">
+                      <Textarea rows={3} value={spec} placeholder="e.g. BSc in CSE, full stack developer" onChange={(e) => setSpec(e.target.value)} />
+                      <div className="flex gap-2"><Button size="sm" busy={act.busy} onClick={saveSpec}>Save</Button><Button size="sm" variant="ghost" onClick={() => setSpec(null)}>Cancel</Button></div>
+                    </div>
+                  ) : (
+                    <span>{v.specialization ? <span className="whitespace-pre-line">{v.specialization}</span> : <span className="text-amber-700">Not set: CVs are not screened</span>}
+                      {can(P.VACANCY_EDIT) && <button className="ml-2 text-xs font-medium text-brand-700 hover:underline" onClick={() => setSpec(v.specialization ?? '')}>Edit</button>}</span>
+                  )] as [string, React.ReactNode]] : []),
                   ['Remarks', show(v.remarks)],
                 ]} />
               </Card>
               <Card className="lg:col-span-2" title="Job posts / circulars" actions={can(P.JOBPOST_EDIT) && <Button size="sm" onClick={() => setNewPost({ title: v.positionTitle, startDate: '', deadline: '' })}>New job post</Button>} pad={false}>
                 {v.jobPosts.length ? (
-                  <Table head={['Job post', 'Title', 'Application window', 'Criteria version', 'Status']}>
+                  <Table head={['Job post', 'Title', 'Application window', 'Status']}>
                     {v.jobPosts.map((j: any) => (
                       <tr key={j.id}>
                         <Td>
@@ -98,17 +109,15 @@ function Workspace() {
                         </Td>
                         <Td>{j.title}</Td>
                         <Td className="whitespace-nowrap">{fmtDate(j.startDate)} – {fmtDate(j.deadline)}</Td>
-                        <Td>{j.currentCriteriaVersion ? `v${j.currentCriteriaVersion}` : <span className="text-amber-700">not configured</span>}</Td>
                         <Td><Badge>{j.status}</Badge></Td>
                       </tr>
                     ))}
                   </Table>
-                ) : <p className="p-4 text-sm text-muted">No job post yet. Create one to set the circular, dates and screening criteria.</p>}
+                ) : <p className="p-4 text-sm text-muted">No job post yet. Create one to set the circular and dates.</p>}
               </Card>
             </div>
           )}
           {tab === 'candidates' && <CandidatesTab vacancy={v} />}
-          {tab === 'evaluation' && <EvaluationTab vacancy={v} />}
           {tab === 'emails' && <EmailsTab vacancyId={v.id} />}
 
           <Modal open={!!newPost} title="New job post" onClose={() => setNewPost(null)}

@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query,
+  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query,
 } from '@nestjs/common';
 import { AuthUser, CurrentUser, RequirePerm } from '../common/auth';
 import { P } from '../common/permissions';
@@ -31,6 +31,12 @@ export class EmailController {
   @RequirePerm(P.TEMPLATE_MANAGE)
   update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: TemplateDto, @CurrentUser() me: AuthUser) {
     return this.svc.saveTemplate(id, dto, me);
+  }
+
+  @Delete('templates/:id')
+  @RequirePerm(P.TEMPLATE_MANAGE)
+  remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
+    return this.svc.deleteTemplate(id, me);
   }
 
   @Post('preview')

@@ -6,7 +6,7 @@ import { DataSource } from 'typeorm';
 import { AuthUser, CurrentUser, RequirePerm } from '../common/auth';
 import { P } from '../common/permissions';
 import { assertJoiningAccess } from '../common/scope';
-import { ApproveDto, JoinedQuery, JoiningUpdateDto, NotJoinedDto } from './joining.dto';
+import { ApproveDto, JoinedQuery, JoiningUpdateDto, ReasonDto } from './joining.dto';
 import { JoiningService } from './joining.service';
 
 @Controller('joining')
@@ -17,6 +17,12 @@ export class JoiningController {
   @RequirePerm(P.JOINING_VIEW)
   pending(@CurrentUser() me: AuthUser) {
     return this.svc.pending(me);
+  }
+
+  @Get('rejected')
+  @RequirePerm(P.JOINING_VIEW)
+  rejected(@CurrentUser() me: AuthUser) {
+    return this.svc.rejected(me);
   }
 
   @Get('joined')
@@ -40,11 +46,19 @@ export class JoiningController {
     return this.svc.approve(id, dto, me);
   }
 
-  @Post(':id/not-joined')
+  @Post(':id/reject')
   @HttpCode(200)
   @RequirePerm(P.JOINING_APPROVE)
-  async notJoined(@Param('id', ParseUUIDPipe) id: string, @Body() dto: NotJoinedDto, @CurrentUser() me: AuthUser) {
+  async reject(@Param('id', ParseUUIDPipe) id: string, @Body() dto: ReasonDto, @CurrentUser() me: AuthUser) {
     await assertJoiningAccess(this.ds, me, id);
-    return this.svc.notJoined(id, dto.remarks, me);
+    return this.svc.reject(id, dto.remarks, me);
+  }
+
+  @Post(':id/reopen')
+  @HttpCode(200)
+  @RequirePerm(P.JOINING_APPROVE)
+  async reopen(@Param('id', ParseUUIDPipe) id: string, @Body() dto: ReasonDto, @CurrentUser() me: AuthUser) {
+    await assertJoiningAccess(this.ds, me, id);
+    return this.svc.reopen(id, dto.remarks, me);
   }
 }

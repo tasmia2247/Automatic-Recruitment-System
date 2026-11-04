@@ -36,6 +36,12 @@ export class JoiningService {
     return rows.map((j) => this.view(j));
   }
 
+  async rejected(me: AuthUser) {
+    const qb = this.base('Rejected').orderBy('j.updatedAt', 'DESC');
+    this.scope(qb, me);
+    return (await qb.getMany()).map((j) => this.view(j));
+  }
+
   async joined(q: JoinedQuery, me: AuthUser) {
     const qb = this.base('Approved').leftJoin('users', 'u', 'u.id = j.approvedById').addSelect('u.name', 'approver').orderBy('j.joiningDate', 'DESC');
     this.scope(qb, me);
@@ -58,7 +64,7 @@ export class JoiningService {
   private view(j: JoiningRecord) {
     const a = j.application;
     return {
-      id: j.id, joiningDate: j.joiningDate, status: j.status, letterStatus: j.letterStatus, remarks: j.remarks, approvedAt: j.approvedAt,
+      id: j.id, joiningDate: j.joiningDate, status: j.status, letterStatus: j.letterStatus, remarks: j.remarks, approvedAt: j.approvedAt, updatedAt: j.updatedAt,
       applicationId: a.id, applicationNo: a.applicationNo, candidateNo: a.candidate.candidateNo, name: a.candidate.name,
       email: a.candidate.email, phone: a.candidate.phone, finalDecision: a.finalDecision, finalDecisionAt: a.finalDecisionAt,
       vacancyId: a.vacancy.id, vacancyNo: a.vacancy.vacancyNo, position: a.vacancy.positionTitle,
@@ -107,14 +113,28 @@ export class JoiningService {
     });
   }
 
-  async notJoined(id: string, remarks: string, me: AuthUser) {
+  /** A selected candidate turned down at joining stays listed as Rejected (owner, 2026-11-04); the final decision is untouched. */
+  async reject(id: string, remarks: string, me: AuthUser) {
+    return this.move(id, 'Pending', 'Rejected', remarks, 'joining.reject', me);
+  }
+
+  /** Undoes a rejection made by mistake: back to Joining Pending, while the final decision is still Selected. */
+  async reopen(id: string, remarks: string, me: AuthUser) {
+    return this.move(id, 'Rejected', 'Pending', remarks, 'joining.reopen', me);
+  }
+
+  private async move(id: string, from: JoiningRecord['status'], to: JoiningRecord['status'], remarks: string, action: string, me: AuthUser) {
     return this.ds.transaction(async (m) => {
       const j = await m.findOne(JoiningRecord, { where: { id }, lock: { mode: 'pessimistic_write' } });
       if (!j) throw new NotFoundException();
-      if (j.status !== 'Pending') throw new ConflictException(`Joining record is ${j.status}.`);
-      Object.assign(j, { status: 'Did Not Join', remarks });
+      if (j.status === to) return j;
+      if (j.status !== from) throw new ConflictException(`Joining record is ${j.status}.`);
+      const app = await m.findOneOrFail(Application, { where: { id: j.applicationId } });
+      if (to === 'Pending' && app.finalDecision !== 'Selected') throw new ConflictException('The final decision is no longer Selected, so the candidate cannot return to Joining Pending.');
+      const old = { status: j.status, remarks: j.remarks };
+      Object.assign(j, { status: to, remarks });
       await m.save(j);
-      await this.audit.log(m, me, 'joining.did_not_join', 'Application', j.applicationId, { new: { remarks } });
+      await this.audit.log(m, me, action, 'Application', j.applicationId, { label: app.applicationNo, old, new: { status: to, remarks } });
       return j;
     });
   }

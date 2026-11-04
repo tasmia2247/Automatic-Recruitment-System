@@ -9,20 +9,34 @@ import { P } from '../common/permissions';
 import { AuditService, diff, IdService, normalizeEmail, normalizePhone, NotificationService, StorageService, validateUpload } from '../common/services';
 import {
   Application, AuditEvent, Candidate, CandidateDocument, CandidateRemark, CandidateStage, EmailEvent, EvaluationMark,
-  ExtractionRun, IntakeMessage, JobPost, JoiningRecord, ProcessingJob, ScreeningCriteriaSet, ScreeningRun, Vacancy,
+  ExtractionRun, IntakeMessage, JobPost, JoiningRecord, ProcessingJob, Requisition, ScreeningRun, Vacancy,
 } from '../database/entities';
 import { JobsService } from '../processing/jobs.service';
-import { screen } from '../screening/screening.engine';
+import { screen, specializationCriteria } from '../screening/screening.engine';
 import { CORE_FIELDS, cvToText, EXTRACTED_FIELDS, EXTRACTOR_VERSION, extractFromText } from './cv-extractor';
 
 export interface UploadResult { fileName: string; ok: boolean; applicationNo?: string; candidateNo?: string; applicationId?: string; error?: string }
 
 export const EDITABLE_APP_FIELDS = [
-  'education', 'degree', 'institution', 'cgpaRaw', 'cgpa', 'totalExperienceYears', 'relevantExperienceYears', 'workplace',
-  'skills', 'expectedSalary', 'age',
+  'education', 'degree', 'specialization', 'institution', 'cgpaRaw', 'cgpa', 'totalExperienceYears', 'relevantExperienceYears', 'lastPosition', 'workplace',
+  'skills', 'address', 'certifications', 'previousJobs', 'expectedSalary', 'age',
 ] as const;
 
-const RESULT_ORDER = `CASE a."screeningResult" WHEN 'Pass' THEN 0 WHEN 'Review Required' THEN 1 WHEN 'Fail' THEN 2 ELSE 3 END`;
+/** HR's "New CV data bank" columns, then the extra CV fields the owner asked for (2026-11-04). */
+const CV_DATA_COLUMNS = [
+  { header: 'APPLICATION ID', key: 'applicationNo', width: 18 }, { header: 'EMAIL', key: 'email', width: 30 },
+  { header: 'NAME OF THE APPLICANT', key: 'name', width: 34 }, { header: 'DATE OF RECEIVING CV', key: 'received', width: 16 },
+  { header: 'LAST POSITION', key: 'lastPosition', width: 23 }, { header: 'LAST ORGANIZATION NAME', key: 'workplace', width: 25 },
+  { header: 'TOTAL YEAR OF EXPERIENCE', key: 'experience', width: 16 }, { header: 'PRELIMINARY RECOMMENDED POSITION', key: 'position', width: 22 },
+  { header: 'PRELIMINARY RECOMMENDED DEPARTMENT', key: 'department', width: 22 }, { header: 'PRELIMINARY RECOMMENDED FACTORY', key: 'factory', width: 20 },
+  { header: 'MOBILE NO.', key: 'phone', width: 18 }, { header: 'SOURCE OF CV', key: 'source', width: 13 },
+  { header: 'EDUCATIONAL STATUS', key: 'degree', width: 20 }, { header: 'EDUCATION SPECIALIZATION WITH REMARK (IF ANY)', key: 'specialization', width: 32 },
+  { header: 'ADDRESS', key: 'address', width: 34 }, { header: 'SKILLS', key: 'skills', width: 34 },
+  { header: 'PREVIOUS JOBS & DESIGNATIONS', key: 'previousJobs', width: 40 }, { header: 'CERTIFICATIONS', key: 'certifications', width: 32 },
+  { header: 'EXPECTED SALARY', key: 'expectedSalary', width: 16 }, { header: 'AGE', key: 'age', width: 8 },
+];
+
+const RESULT_ORDER =`CASE a."screeningResult" WHEN 'Pass' THEN 0 WHEN 'Review Required' THEN 1 WHEN 'Fail' THEN 2 ELSE 3 END`;
 
 @Injectable()
 export class CandidatesService implements OnModuleInit {
@@ -65,7 +79,7 @@ export class CandidatesService implements OnModuleInit {
   }
 
   /** Creates candidate + application + document and queues extraction. Same file twice for a vacancy is rejected. */
-  async createApplicationFromFile(m: EntityManager, vacancy: Vacancy, buffer: Buffer, fileName: string, mimeType: string, source: 'MANUAL' | 'EMAIL', me: AuthUser | null, sender?: string | null) {
+  async createApplicationFromFile(m: EntityManager, vacancy: Vacancy, buffer: Buffer, fileName: string, mimeType: string, source: 'MANUAL' | 'EMAIL', me: AuthUser | null, receivedAt = new Date()) {
     const sha256 = createHash('sha256').update(buffer).digest('hex');
     const dup = await m.createQueryBuilder(CandidateDocument, 'd').innerJoin(Application, 'a', 'a.id = d.applicationId')
       .where('d.sha256 = :h AND a.vacancyId = :v', { h: sha256, v: vacancy.id }).select('a.applicationNo', 'no').getRawOne();
@@ -73,14 +87,12 @@ export class CandidatesService implements OnModuleInit {
 
     const jobPost = await m.findOne(JobPost, { where: { vacancyId: vacancy.id, status: 'Published' }, order: { createdAt: 'DESC' } })
       ?? await m.findOne(JobPost, { where: { vacancyId: vacancy.id }, order: { createdAt: 'DESC' } });
-    const senderEmail = normalizeEmail(sender);
-    const candidate = await m.save(Candidate, m.create(Candidate, {
-      candidateNo: await this.ids.next(m, 'CAND'), email: senderEmail, emailNormalized: senderEmail,
-    }));
+    // The email comes from the CV: a mail's sender is often HR forwarding it or a job portal, not the candidate.
+    const candidate = await m.save(Candidate, m.create(Candidate, { candidateNo: await this.ids.next(m, 'CAND') }));
     const stored = this.storage.save(buffer, fileName, mimeType, 'cvs');
     const app = await m.save(Application, m.create(Application, {
       applicationNo: await this.ids.next(m, 'APP'), candidateId: candidate.id, vacancyId: vacancy.id, jobPostId: jobPost?.id ?? null,
-      source, receivedAt: new Date(), processingStatus: 'Queued',
+      source, receivedAt, processingStatus: 'Queued',
     }));
     await m.insert(CandidateDocument, {
       applicationId: app.id, candidateId: candidate.id, ...stored, source, uploadedById: me?.id ?? null,
@@ -122,7 +134,7 @@ export class CandidatesService implements OnModuleInit {
       const fresh = await m.findOneOrFail(Application, { where: { id: applicationId }, lock: { mode: 'pessimistic_write' } });
       // Never overwrite values a human has corrected.
       const patch: Partial<Application> = {};
-      for (const f of ['education', 'degree', 'institution', 'cgpaRaw', 'cgpa', 'totalExperienceYears', 'workplace', 'skills', 'expectedSalary', 'age'] as const) {
+      for (const f of ['education', 'degree', 'specialization', 'institution', 'cgpaRaw', 'cgpa', 'totalExperienceYears', 'lastPosition', 'workplace', 'skills', 'address', 'certifications', 'previousJobs', 'expectedSalary', 'age'] as const) {
         if (!fresh.correctedFields.includes(f)) (patch as any)[f] = ex[f];
       }
       patch.processingStatus = partial ? 'Partial' : 'Completed';
@@ -163,34 +175,39 @@ export class CandidatesService implements OnModuleInit {
     }
   }
 
+  /**
+   * Screens against the requisition's "Specialization required" (a Direct HR vacancy's own): each item must be written
+   * in the CV or in the (extracted or corrected) fields.
+   */
   async processScreening(applicationId: string, runById: string | null) {
+    const app = await this.ds.getRepository(Application).findOne({ where: { id: applicationId }, relations: { vacancy: { requisition: true } } });
+    if (!app) throw new Error('Application no longer exists.');
+    const req: Requisition | null = app.vacancy.requisition;
+    const criteria = specializationCriteria(req ? req.specialization : app.vacancy.specialization);
+    if (!criteria.length) {
+      return { status: 'Partial' as const, note: req ? `Requisition ${req.reqNo} has no "Specialization required"; screening skipped.` : `Direct HR vacancy ${app.vacancy.vacancyNo} has no "Specialization required"; screening skipped.` };
+    }
+    // Read outside the transaction: PDF parsing is slow. An unreadable file still screens on the corrected fields.
+    const doc = await this.ds.getRepository(CandidateDocument).findOne({ where: { applicationId }, order: { createdAt: 'DESC' } });
+    const cvText = doc ? await cvToText(this.storage.read(doc.storageKey), doc.originalName).catch(() => '') : '';
     return this.ds.transaction(async (m) => {
-      const app = await m.findOne(Application, { where: { id: applicationId }, lock: { mode: 'pessimistic_write' } });
-      if (!app) throw new Error('Application no longer exists.');
-      if (!app.jobPostId) {
-        const jp = await m.findOne(JobPost, { where: { vacancyId: app.vacancyId }, order: { createdAt: 'DESC' } });
-        if (!jp) return { status: 'Partial' as const, note: 'No job post / criteria for this vacancy yet; screening skipped.' };
-        app.jobPostId = jp.id;
-        await m.update(Application, app.id, { jobPostId: jp.id });
-      }
-      const jp = await m.findOneOrFail(JobPost, { where: { id: app.jobPostId! } });
-      if (!jp.currentCriteriaVersion) return { status: 'Partial' as const, note: 'Job post has no screening criteria yet; screening skipped.' };
-      const set = await m.findOneOrFail(ScreeningCriteriaSet, { where: { jobPostId: jp.id, version: jp.currentCriteriaVersion } });
+      const a = await m.findOneOrFail(Application, { where: { id: applicationId }, lock: { mode: 'pessimistic_write' } });
       const input = {
-        degree: app.degree, education: app.education, institution: app.institution, cgpa: app.cgpa,
-        totalExperienceYears: app.totalExperienceYears, relevantExperienceYears: app.relevantExperienceYears,
-        skills: app.skills, expectedSalary: app.expectedSalary, age: app.age,
+        degree: a.degree, education: a.education, specialization: a.specialization, institution: a.institution, cgpa: a.cgpa,
+        totalExperienceYears: a.totalExperienceYears, relevantExperienceYears: a.relevantExperienceYears, lastPosition: a.lastPosition, workplace: a.workplace,
+        skills: a.skills, certifications: a.certifications, previousJobs: a.previousJobs, expectedSalary: a.expectedSalary, age: a.age,
       };
-      const { overall, results } = screen(set.criteria.sort((a, b) => a.sortOrder - b.sortOrder), input);
+      const searched = [cvText, ...Object.values(input).filter((v) => typeof v === 'string')].join('\n');
+      const { overall, results } = screen(criteria, { ...input, cvText: searched });
       const run = await m.save(ScreeningRun, m.create(ScreeningRun, {
-        applicationId, criteriaSetId: set.id, criteriaVersion: set.version, overallResult: overall, results, inputs: input, runById,
+        applicationId, basis: req ? 'REQUISITION' : 'VACANCY', criteriaSetId: null, criteriaVersion: req ? req.version : app.vacancy.specializationVersion, overallResult: overall, results, inputs: input, runById,
       }));
       await m.update(Application, applicationId, { screeningResult: overall, latestScreeningRunId: run.id });
       return undefined;
     });
   }
 
-  /** Re-screen all applications of a vacancy against the current criteria version; old runs are kept. */
+  /** Re-screen all applications of a vacancy against the requisition's "Specialization required"; old runs are kept. */
   async rescreenVacancy(vacancyId: string, me: AuthUser) {
     return this.ds.transaction(async (m) => {
       const apps = await m.find(Application, { where: { vacancyId, processingStatus: In(['Completed', 'Partial']) } });
@@ -368,22 +385,47 @@ export class CandidatesService implements OnModuleInit {
     const msg = await this.ds.getRepository(IntakeMessage).findOne({ where: { id: messageId } });
     if (!msg) throw new NotFoundException();
     if (msg.status === 'Assigned') return msg;
+    if (!msg.attachments.length) throw new ConflictException('This mail has no CV attachment to assign.');
     const vacancy = await this.ds.getRepository(Vacancy).findOneOrFail({ where: { id: vacancyId } });
+    await this.assignAttachments(msg, vacancy, me);
+    await this.audit.log(this.ds.manager, me, 'intake.assign', 'IntakeMessage', msg.id, { label: msg.subject?.slice(0, 60), new: { vacancy: vacancy.vacancyNo } });
+    return msg;
+  }
+
+  /**
+   * Permanently deletes an unmatched or failed mail and its stored attachment copies (owner, 2026-11-04). Applications already
+   * created from it keep their own copy of the CV. Only the audit entry remains; scanning the same mail again brings it back.
+   */
+  async deleteUnmatched(messageId: string, me: AuthUser) {
+    const msg = await this.ds.getRepository(IntakeMessage).findOne({ where: { id: messageId } });
+    if (!msg) throw new NotFoundException('Unmatched CV not found.');
+    if (!['Unmatched', 'Failed'].includes(msg.status)) throw new ConflictException(`This mail is ${msg.status}; only unmatched or failed CVs can be deleted.`);
+    await this.ds.transaction(async (m) => {
+      await m.delete(IntakeMessage, msg.id);
+      await this.audit.log(m, me, 'intake.delete', 'IntakeMessage', msg.id, {
+        label: msg.subject?.slice(0, 60),
+        old: { subject: msg.subject, sender: msg.sender, receivedAt: msg.receivedAt, status: msg.status, files: msg.attachments.map((a) => a.originalName) },
+      });
+    });
+    for (const a of msg.attachments) this.storage.remove(a.storageKey);
+    return { deleted: true };
+  }
+
+  /** Creates one application per attached CV; a file that fails keeps its error and can be assigned again. */
+  async assignAttachments(msg: IntakeMessage, vacancy: Vacancy, me: AuthUser) {
     for (const att of msg.attachments) {
       if (att.applicationId) continue;
       try {
-        const app = await this.ds.transaction((m) => this.createApplicationFromFile(m, vacancy, this.storage.read(att.storageKey), att.originalName, att.mimeType, 'EMAIL', me, msg.sender));
+        const app = await this.ds.transaction((m) => this.createApplicationFromFile(m, vacancy, this.storage.read(att.storageKey), att.originalName, att.mimeType, 'EMAIL', me, msg.receivedAt ?? undefined));
         att.applicationId = app.id;
         delete att.error;
       } catch (e: any) {
         att.error = e?.response?.message ?? e.message;
       }
     }
-    msg.vacancyId = vacancyId;
+    msg.vacancyId = vacancy.id;
     msg.status = msg.attachments.every((a) => a.applicationId) ? 'Assigned' : 'Failed';
     await this.ds.getRepository(IntakeMessage).save(msg);
-    await this.audit.log(this.ds.manager, me, 'intake.assign', 'IntakeMessage', msg.id, { label: msg.subject?.slice(0, 60), new: { vacancy: vacancy.vacancyNo } });
-    return msg;
   }
 
   // ------------------------------------------------------------------ Excel export (SRS 11)
@@ -426,6 +468,42 @@ export class CandidatesService implements OnModuleInit {
     ws.views = [{ state: 'frozen', ySplit: 1 }];
     await this.audit.log(this.ds.manager, me, 'report.candidate_export', 'Vacancy', vacancyId, { label: vacancy.vacancyNo, new: { rows: apps.length, filter: result ?? 'all' } });
     return { fileName: `${vacancy.vacancyNo}_candidates.xlsx`, buffer: Buffer.from(await wb.xlsx.writeBuffer()) };
+  }
+
+  /** The rows of a vacancy's CV data sheet, shared by the Excel download and the in-browser view. */
+  async cvData(vacancyId: string) {
+    const vacancy = await this.ds.getRepository(Vacancy).findOne({ where: { id: vacancyId }, relations: { department: true, company: true } });
+    if (!vacancy) throw new NotFoundException();
+    const apps = await this.ds.getRepository(Application).createQueryBuilder('a').innerJoinAndSelect('a.candidate', 'c')
+      .where('a.vacancyId = :v', { v: vacancyId }).orderBy('a.receivedAt', 'ASC').addOrderBy('a.applicationNo', 'ASC').getMany();
+    const REVIEW = 'Needs review';
+    const rows = apps.map((a) => ({
+      applicationId: a.id, applicationNo: a.applicationNo, email: a.candidate.email ?? REVIEW, name: a.candidate.name ?? REVIEW, received: a.receivedAt,
+      lastPosition: a.lastPosition ?? '', workplace: a.workplace ?? '', experience: a.totalExperienceYears ?? '',
+      position: vacancy.positionTitle, department: vacancy.department.name, factory: vacancy.company.code,
+      phone: a.candidate.phone ?? REVIEW, source: a.source === 'EMAIL' ? 'EMAIL' : 'UPLOAD', degree: a.degree ?? '', specialization: a.specialization ?? '',
+      address: a.address ?? '', skills: a.skills ?? '', previousJobs: a.previousJobs ?? '', certifications: a.certifications ?? '',
+      expectedSalary: a.expectedSalary ?? '', age: a.age ?? '',
+    }));
+    return { vacancy: { id: vacancy.id, vacancyNo: vacancy.vacancyNo, positionTitle: vacancy.positionTitle }, columns: CV_DATA_COLUMNS.map(({ header, key }) => ({ header, key })), rows };
+  }
+
+  /** One Excel per vacancy with the fields read from each CV, in the layout of HR's CV data bank sheet plus the extra CV fields. */
+  async exportCvData(vacancyId: string, me: AuthUser) {
+    const { vacancy, rows } = await this.cvData(vacancyId);
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Ananta ARS';
+    const ws = wb.addWorksheet('CV data');
+    ws.columns = CV_DATA_COLUMNS.map((c) => ({ ...c, style: c.key === 'received' ? { numFmt: 'yyyy-mm-dd' } : { alignment: { wrapText: true, vertical: 'top' } } }));
+    for (const r of rows) ws.addRow(r);
+    const header = ws.getRow(1);
+    header.font = { bold: true };
+    header.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' };
+    header.eachCell((c) => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFA9D08E' } }; });
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws.columns.length } };
+    await this.audit.log(this.ds.manager, me, 'report.cv_data_export', 'Vacancy', vacancyId, { label: vacancy.vacancyNo, new: { rows: rows.length } });
+    return { fileName: `${vacancy.vacancyNo}_CV_data.xlsx`, buffer: Buffer.from(await wb.xlsx.writeBuffer()) };
   }
 
   async pendingJobsFor(applicationId: string) {

@@ -4,12 +4,16 @@ import * as ExcelJS from 'exceljs';
 import { DataSource, In } from 'typeorm';
 import { AuthUser } from '../common/auth';
 import { P } from '../common/permissions';
+import { coordinatorScope } from '../common/scope';
 import { AuditService, diff, IdService, NotificationService } from '../common/services';
 import {
   Application, CandidateStage, DecisionStatus, EvaluationMark, ImportBatch, ImportRow, JoiningRecord, StageType, Vacancy,
 } from '../database/entities';
 
-export const STAGE_LABEL: Record<StageType, string> = { WRITTEN: 'Written Exam', INTERVIEW: 'Interview', VIVA: 'Viva' };
+export const STAGE_LABEL: Record<StageType, string> = { WRITTEN: 'Written Exam', INTERVIEW: 'Interview Board', OPTIONAL: 'Optional Exam' };
+/** One slot for both: the same date, time, venue, panel, duration and attendance; marks and results stay per exam. */
+export const MAIN_DAY: StageType[] = ['WRITTEN', 'INTERVIEW'];
+const SHARED = ['scheduledAt', 'location', 'panel', 'durationMinutes', 'attendance'] as const;
 
 @Injectable()
 export class EvaluationService {
@@ -47,38 +51,81 @@ export class EvaluationService {
     };
   }
 
-  async upsertStage(applicationId: string, stageType: StageType, dto: { scheduledAt?: string | null; location?: string | null; attendance?: CandidateStage['attendance']; result?: DecisionStatus }, me: AuthUser) {
+  /**
+   * Interview Board (owner, 2026-11-04): shortlisted applications, plus any with a round on record, across every vacancy the
+   * user coordinates (all vacancies with recruitment.view_all), ordered by department, designation and name.
+   */
+  async interviewBoard(q: { departmentId?: string; vacancyId?: string; q?: string }, me: AuthUser) {
+    const qb = this.ds.getRepository(Application).createQueryBuilder('a').innerJoinAndSelect('a.candidate', 'c')
+      .innerJoinAndSelect('a.vacancy', 'v').innerJoinAndSelect('v.department', 'd').innerJoinAndSelect('v.company', 'co')
+      .where('(a.shortlisted = true OR EXISTS (SELECT 1 FROM candidate_stages s WHERE s."applicationId" = a.id))');
+    const scope = coordinatorScope(me);
+    if (scope) qb.andWhere('v.coordinatorId = :me', { me: scope });
+    if (q.departmentId) qb.andWhere('v.departmentId = :d', { d: q.departmentId });
+    if (q.vacancyId) qb.andWhere('v.id = :v', { v: q.vacancyId });
+    if (q.q) qb.andWhere('(c.name ILIKE :q OR c.candidateNo ILIKE :q OR a.applicationNo ILIKE :q)', { q: `%${q.q}%` });
+    const apps = await qb.orderBy('d.name', 'ASC').addOrderBy('v.positionTitle', 'ASC').addOrderBy('c.name', 'ASC', 'NULLS LAST').getMany();
+    const ids = apps.map((a) => a.id);
+    const [stages, marks, joins] = ids.length ? await Promise.all([
+      this.ds.getRepository(CandidateStage).find({ where: { applicationId: In(ids) } }),
+      this.ds.getRepository(EvaluationMark).find({ where: { applicationId: In(ids) }, relations: { evaluator: true } }),
+      this.ds.getRepository(JoiningRecord).find({ where: { applicationId: In(ids) } }),
+    ]) : [[], [], []];
+    return {
+      allVacancies: !scope,
+      rows: apps.map((a) => ({
+        applicationId: a.id, applicationNo: a.applicationNo, candidateNo: a.candidate.candidateNo, name: a.candidate.name,
+        email: a.candidate.email, phone: a.candidate.phone, screeningResult: a.screeningResult, shortlisted: a.shortlisted,
+        finalDecision: a.finalDecision, finalDecisionRemarks: a.finalDecisionRemarks,
+        vacancy: { id: a.vacancy.id, vacancyNo: a.vacancy.vacancyNo, positionTitle: a.vacancy.positionTitle, status: a.vacancy.status,
+          departmentId: a.vacancy.departmentId, department: a.vacancy.department.name, company: a.vacancy.company.code },
+        stages: Object.fromEntries(stages.filter((s) => s.applicationId === a.id).map((s) => [s.stageType, s])),
+        marks: marks.filter((mk) => mk.applicationId === a.id).map((mk) => ({ ...mk, evaluator: { name: mk.evaluator.name } })),
+        joining: joins.find((j) => j.applicationId === a.id) ?? null,
+      })),
+    };
+  }
+
+  async upsertStage(applicationId: string, stageType: StageType, dto: { scheduledAt?: string | null; location?: string | null; panel?: string | null; durationMinutes?: number | null; attendance?: CandidateStage['attendance']; result?: DecisionStatus }, me: AuthUser) {
     if (dto.attendance !== undefined && !me.permissions.has(P.ATTENDANCE)) throw new ForbiddenException('You cannot record attendance.');
-    if ((dto.result !== undefined || dto.scheduledAt !== undefined || dto.location !== undefined) && !me.permissions.has(P.MARKS_ENTER) && !me.permissions.has(P.SHORTLIST)) {
+    if ((dto.result !== undefined || dto.scheduledAt !== undefined || dto.location !== undefined || dto.panel !== undefined || dto.durationMinutes !== undefined) && !me.permissions.has(P.MARKS_ENTER) && !me.permissions.has(P.SHORTLIST)) {
       throw new ForbiddenException('You cannot update stage schedule/results.');
     }
+    const shared = {
+      ...(dto.scheduledAt !== undefined ? { scheduledAt: dto.scheduledAt ? new Date(dto.scheduledAt) : null } : {}),
+      ...(dto.location !== undefined ? { location: dto.location } : {}),
+      ...(dto.panel !== undefined ? { panel: dto.panel?.trim() || null } : {}),
+      ...(dto.durationMinutes !== undefined ? { durationMinutes: dto.durationMinutes } : {}),
+      ...(dto.attendance !== undefined ? { attendance: dto.attendance } : {}),
+    };
+    // Written exam and Interview board share one slot: its time, venue, panel and attendance go to both rows; a result only to its own exam.
+    const targets = MAIN_DAY.includes(stageType) && SHARED.some((k) => k in shared) ? MAIN_DAY : [stageType];
     return this.ds.transaction(async (m) => {
       const app = await m.findOne(Application, { where: { id: applicationId } });
       if (!app) throw new NotFoundException();
-      let st = await m.findOne(CandidateStage, { where: { applicationId, stageType }, lock: { mode: 'pessimistic_write' } });
-      const before = st ? { ...st } : {};
-      if (!st) st = m.create(CandidateStage, { applicationId, stageType });
-      Object.assign(st, {
-        ...(dto.scheduledAt !== undefined ? { scheduledAt: dto.scheduledAt ? new Date(dto.scheduledAt) : null } : {}),
-        ...(dto.location !== undefined ? { location: dto.location } : {}),
-        ...(dto.attendance !== undefined ? { attendance: dto.attendance } : {}),
-        ...(dto.result !== undefined ? { result: dto.result } : {}),
-        updatedById: me.id,
-      });
-      await m.save(st);
-      const d = diff(before, st, ['scheduledAt', 'location', 'attendance', 'result']);
-      if (d.changed.length) await this.audit.log(m, me, `stage.${stageType.toLowerCase()}.update`, 'Application', applicationId, { label: `${app.applicationNo} ${STAGE_LABEL[stageType]}`, old: d.old, new: d.new });
-      return st;
+      let requested: CandidateStage | null = null;
+      for (const t of targets) {
+        let st = await m.findOne(CandidateStage, { where: { applicationId, stageType: t }, lock: { mode: 'pessimistic_write' } });
+        const before = st ? { ...st } : {};
+        if (!st) st = m.create(CandidateStage, { applicationId, stageType: t });
+        Object.assign(st, shared, t === stageType && dto.result !== undefined ? { result: dto.result } : {}, { updatedById: me.id });
+        await m.save(st);
+        const d = diff(before, st, ['scheduledAt', 'location', 'panel', 'durationMinutes', 'attendance', 'result']);
+        if (d.changed.length) await this.audit.log(m, me, `stage.${t.toLowerCase()}.update`, 'Application', applicationId, { label: `${app.applicationNo} ${STAGE_LABEL[t]}`, old: d.old, new: d.new });
+        if (t === stageType) requested = st;
+      }
+      return requested!;
     });
   }
 
-  /** Bulk scheduling used by the shortlist/invitation screen. */
-  async schedule(vacancyId: string, applicationIds: string[], stageType: StageType, scheduledAt: string, location: string | undefined, me: AuthUser) {
+  /** Bulk scheduling; `vacancyId` null = applications of any vacancy (the Interview Board), access checked by the caller. */
+  async schedule(vacancyId: string | null, applicationIds: string[], stageType: StageType, scheduledAt: string, slot: { location?: string; panel?: string; durationMinutes?: number }, me: AuthUser) {
     const out = [];
     for (const id of applicationIds) {
-      const app = await this.ds.getRepository(Application).findOne({ where: { id, vacancyId } });
-      if (!app) { out.push({ applicationId: id, ok: false, error: 'Not part of this vacancy.' }); continue; }
-      await this.upsertStage(id, stageType, { scheduledAt, location: location ?? null }, me);
+      const app = await this.ds.getRepository(Application).findOne({ where: vacancyId ? { id, vacancyId } : { id } });
+      if (!app) { out.push({ applicationId: id, ok: false, error: vacancyId ? 'Not part of this vacancy.' : 'Application not found.' }); continue; }
+      if (!app.shortlisted) { out.push({ applicationId: id, applicationNo: app.applicationNo, ok: false, error: 'Shortlist the candidate before scheduling.' }); continue; }
+      await this.upsertStage(id, stageType, { scheduledAt, location: slot.location ?? null, panel: slot.panel ?? null, durationMinutes: slot.durationMinutes ?? null }, me);
       out.push({ applicationId: id, applicationNo: app.applicationNo, ok: true });
     }
     return out;
@@ -231,7 +278,7 @@ export class EvaluationService {
       b.confirmedAt = new Date();
       await m.save(b);
       await this.audit.log(m, me, 'marks.import_confirm', 'ImportBatch', id, { label: b.batchNo, new: { saved, rejected: b.rowsRejected, overwritten: overwrites.length, stage: b.stageType } });
-      await this.notify.notify(m, [b.uploaderId], 'import.completed', `Marks import ${b.batchNo}: ${saved} saved, ${b.rowsRejected} rejected`, `/vacancies/${b.vacancyId}?tab=evaluation`);
+      await this.notify.notify(m, [b.uploaderId], 'import.completed', `Marks import ${b.batchNo}: ${saved} saved, ${b.rowsRejected} rejected`, `/interviews`);
       return { batch: b, saved, duplicate: false };
     });
   }

@@ -22,19 +22,23 @@ const NAV: { section: string; items: NavItem[] }[] = [
     section: 'Recruitment', items: [
       { href: '/hr-queue', label: 'HR Approved Queue', perm: P.HR_QUEUE },
       { href: '/vacancies', label: 'Vacancies & Candidates', perm: P.VACANCY_VIEW },
-      { href: '/cv-bank', label: 'All CVs / Candidate CV Bank', perm: P.CANDIDATE_VIEW },
-      { href: '/intake', label: 'Unmatched CVs', perms: [P.CV_UPLOAD, P.RECRUITMENT_ALL] },
+      { href: '/interviews', label: 'Interview Board', perm: P.CANDIDATE_VIEW },
       { href: '/joining', label: 'Joining Pending', perm: P.JOINING_VIEW },
       { href: '/joined', label: 'Joined Candidates', perm: P.JOINED_VIEW },
+      { href: '/cv-bank', label: 'All CVs / Candidate CV Bank', perm: P.CANDIDATE_VIEW },
+    ],
+  },
+  {
+    // Lists and texts the rest of ARS picks from.
+    section: 'Predefined Fields', items: [
+      { href: '/admin/master', label: 'Master Data', perm: P.MASTER_CONFIGURE },
+      { href: '/admin/templates', label: 'Email Templates', perm: P.TEMPLATE_MANAGE },
     ],
   },
   {
     section: 'Administration', items: [
-      { href: '/admin/templates', label: 'Email Templates', perm: P.TEMPLATE_MANAGE },
       { href: '/admin/users', label: 'Users & Roles', perm: P.USER_MANAGE },
       { href: '/admin/routes', label: 'Approval Routes', perm: P.APPROVAL_ROUTE_CONFIGURE },
-      { href: '/admin/master', label: 'Master Data', perm: P.MASTER_CONFIGURE },
-      { href: '/admin/monitor', label: 'Processing Monitor', perm: P.MONITOR_VIEW },
       { href: '/admin/audit', label: 'Audit Log', perm: P.AUDIT_VIEW },
     ],
   },

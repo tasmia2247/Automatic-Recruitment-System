@@ -20,13 +20,12 @@ business rules, workflows, roles, permissions, architecture, database structure,
 - Enforce permissions and data scope in the API, never only in the UI. New endpoints on vacancy-owned data need the guards in `backend/src/common/scope.ts`.
 - Keep the backend and frontend separate, with features directly under `backend/src/<feature>/`. Do not reintroduce `apps/` or npm workspaces.
 - Never edit an applied migration. Add a new one, named after the latest `17933000000NN` number.
-- Docker PostgreSQL (`ars-dev-db-1`, volume `ars-dev_db_data`) is the only development database. Never run `down -v` or `seed` on it, and do not use `backend/.pgdata` or `npm run db:local`.
 - Do not touch the `ars` database when testing; tests use `ars_test`. Do not delete requisitions, approval history or other records unless the owner asks.
 
 ## Commands (from the repo root)
 
 ```bash
-docker compose -f docker-compose.dev.yml up -d
+npm run db:local
 ```
 
 ```bash
@@ -45,4 +44,4 @@ npm run typecheck
 npm run build
 ```
 
-The app runs in Docker. Without `--watch`, a backend change needs `docker compose -f docker-compose.dev.yml up -d --build`.
+The `ars-api` preview runs the compiled `backend/dist`, so after a backend change: migrate if needed, build, then restart it.

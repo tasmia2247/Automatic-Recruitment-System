@@ -9,7 +9,7 @@ import { ListQuery } from '../common/pagination';
  * It is not stored, so it can never disagree with those records.
  */
 export const APPLICATION_STATUSES = [
-  'Received', 'Screening', 'Pass', 'Fail', 'Review Required', 'Shortlisted', 'Interview', 'Selected', 'Not Selected', 'On Hold', 'Joined',
+  'Received', 'Screening', 'Pass', 'Fail', 'Review Required', 'Shortlisted', 'Interview', 'Selected', 'Not Selected', 'On Hold', 'Joined', 'Rejected',
 ] as const;
 
 export type ApplicationStatus = (typeof APPLICATION_STATUSES)[number];

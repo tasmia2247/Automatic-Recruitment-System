@@ -60,6 +60,19 @@ export const fmtDateTime = (d?: string | Date | null) =>
 export const reqStatusLabel = (status: string) =>
   status === 'Pending Approval' ? 'Processing' : status === 'Sent to HR' || status === 'Approved' ? 'Approved' : status;
 
+/** Remark the API writes on steps that a final approval closed (requisitions.service, final approval on behalf). */
+const FINAL_CLOSED = /^Not required: approved by (.+) \(final approval\)$/;
+/**
+ * How an approval step reads (owner, 2026-11-04): once a final approver approves, the steps it closed show Approved,
+ * credited to that approver. The stored step stays Superseded, so the record never claims the named approver acted.
+ */
+export function approvalStep(a: any, steps: any[]) {
+  const m = a.status === 'Superseded' ? a.remarks?.match(FINAL_CLOSED) : null;
+  if (!m) return { status: a.status as string, note: a.remarks as string | null, decidedAt: a.decidedAt as string | null };
+  const final = steps.find((s) => s.version === a.version && s.status === 'Approved' && s.actedBy);
+  return { status: 'Approved', note: `Approved by ${m[1]} (final approval)`, decidedAt: final?.decidedAt ?? null };
+}
+
 export const show = (v: unknown, empty = '—') => (v === null || v === undefined || v === '' ? empty : String(v));
 
 export function newKey() {

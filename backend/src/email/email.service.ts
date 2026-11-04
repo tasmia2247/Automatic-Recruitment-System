@@ -89,6 +89,21 @@ export class EmailService implements OnModuleInit {
     });
   }
 
+  /**
+   * Deletes a template and its saved versions (owner, 2026-11-04). Emails already sent keep their own subject and body,
+   * so history stays readable; their template reference simply no longer resolves.
+   */
+  async deleteTemplate(id: string, me: AuthUser) {
+    return this.ds.transaction(async (m) => {
+      const t = await m.findOne(EmailTemplate, { where: { id } });
+      if (!t) throw new NotFoundException();
+      await m.delete(EmailTemplateVersion, { templateId: id });
+      await m.delete(EmailTemplate, id);
+      await this.audit.log(m, me, 'template.delete', 'EmailTemplate', id, { label: t.name, old: { name: t.name, kind: t.kind, version: t.version } });
+      return { deleted: true };
+    });
+  }
+
   // ------------------------------------------------------------------ compose / preview / send
 
   private async contexts(applicationIds: string[], extra: Record<string, string> = {}) {

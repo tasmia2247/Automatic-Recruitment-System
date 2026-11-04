@@ -18,5 +18,6 @@ process.env.DATABASE_URL = testUrl();
 process.env.WORKER_ENABLED = 'false';
 process.env.SMTP_HOST = '';
 process.env.STORAGE_DIR = path.join(os.tmpdir(), 'ars-test-storage');
+process.env.MAIL_INTAKE_DIR = path.join(os.tmpdir(), 'ars-test-mail-inbox');
 process.env.JWT_SECRET = 'test-secret';
 process.env.SEED_PASSWORD = 'test-seed-password';

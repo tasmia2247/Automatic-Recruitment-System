@@ -90,6 +90,9 @@ function List() {
               </Field>
             )}
             <Field label="Reason for direct entry" required className="sm:col-span-2"><Textarea value={direct.directReason ?? ''} onChange={(e) => setDirect({ ...direct, directReason: e.target.value })} /></Field>
+            <Field label="Specialization required" className="sm:col-span-2" hint="CVs are screened against this. Separate items with commas, e.g. BSc in CSE, full stack developer. A CV passes when all are written in it. Empty = CVs are not screened.">
+              <Textarea value={direct.specialization ?? ''} onChange={(e) => setDirect({ ...direct, specialization: e.target.value })} />
+            </Field>
           </div>
         )}
         <div className="mt-3"><Alert>{act.error}</Alert></div>

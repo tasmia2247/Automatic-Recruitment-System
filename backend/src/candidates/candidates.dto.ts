@@ -24,13 +24,18 @@ export class CorrectionDto {
   @IsOptional() @IsString() @MaxLength(60) phone?: string;
   @IsOptional() @IsString() education?: string | null;
   @IsOptional() @IsString() degree?: string | null;
+  @IsOptional() @IsString() specialization?: string | null;
   @IsOptional() @IsString() institution?: string | null;
   @IsOptional() @IsString() cgpaRaw?: string | null;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) @Max(5) cgpa?: number | null;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) @Max(60) totalExperienceYears?: number | null;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) @Max(60) relevantExperienceYears?: number | null;
+  @IsOptional() @IsString() lastPosition?: string | null;
   @IsOptional() @IsString() workplace?: string | null;
   @IsOptional() @IsString() skills?: string | null;
+  @IsOptional() @IsString() address?: string | null;
+  @IsOptional() @IsString() certifications?: string | null;
+  @IsOptional() @IsString() previousJobs?: string | null;
   @IsOptional() @IsString() expectedSalary?: string | null;
   @IsOptional() @Type(() => Number) @IsInt() @Min(14) @Max(80) age?: number | null;
 }

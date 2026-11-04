@@ -1,9 +1,25 @@
 import type { CriterionResult, ScreeningCriterion, ScreeningResult } from '../database/entities';
 
 export type ScreeningInput = Partial<Record<
-  'degree' | 'education' | 'institution' | 'cgpa' | 'totalExperienceYears' | 'relevantExperienceYears' | 'skills' | 'expectedSalary' | 'age',
+  'degree' | 'education' | 'institution' | 'cgpa' | 'totalExperienceYears' | 'relevantExperienceYears' | 'skills' | 'expectedSalary' | 'age' | 'cvText',
   string | number | null
 >>;
+
+/** Lowercase words only, so "B.Sc.", "BSc" and "bsc" compare equal and "Full-Stack" matches "full stack". */
+export const normalizeForMatch = (s: string) => ` ${s.toLowerCase().replace(/\./g, '').replace(/[^a-z0-9+#]+/g, ' ').trim()} `;
+
+/** Items of a requisition's "Specialization required", split on commas, semicolons and new lines. */
+export const specializationItems = (s: string | null | undefined) =>
+  [...new Set((s ?? '').split(/[,;\n]/).map((x) => x.trim()).filter((x) => normalizeForMatch(x).trim()))];
+
+/**
+ * Criteria from the requisition: every item must be written in the CV. A missing item is never an automatic Fail,
+ * because CVs word the same thing differently; it sends the CV to Review Required for HR to check.
+ */
+export const specializationCriteria = (s: string | null | undefined): Criterion[] =>
+  specializationItems(s).map((item, i) => ({
+    id: `specialization-${i + 1}`, label: item.slice(0, 120), field: 'cvText', operator: 'mentions', value: item, mandatory: true, missingPolicy: 'REVIEW' as const,
+  }));
 
 type Criterion = Pick<ScreeningCriterion, 'id' | 'label' | 'field' | 'operator' | 'value' | 'mandatory' | 'missingPolicy'>;
 
@@ -22,6 +38,13 @@ const keywords = (s: string) => s.split(',').map((k) => k.trim().toLowerCase()).
 
 function evaluate(c: Criterion, actual: unknown): CriterionResult {
   const base = { criterionId: c.id, label: c.label, field: c.field, operator: c.operator, expected: c.value, actual: actual ?? null, mandatory: c.mandatory };
+  if (c.operator === 'mentions') {
+    // The whole CV is the input: record only whether the item was found, not the CV text.
+    const found = !isMissing(actual) && normalizeForMatch(String(actual)).includes(normalizeForMatch(c.value));
+    return found
+      ? { ...base, actual: 'found', outcome: 'Pass', reason: `${c.label}: found in CV.` }
+      : { ...base, actual: null, outcome: 'Missing', reason: `${c.label}: not found in CV - needs manual verification.` };
+  }
   if (isMissing(actual)) {
     return { ...base, outcome: 'Missing', reason: `${c.label}: not found in CV - needs manual verification.` };
   }

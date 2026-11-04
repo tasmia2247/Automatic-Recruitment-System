@@ -1,5 +1,5 @@
 import {
-  IsDateString, IsIn, IsOptional, IsString, IsUUID, MaxLength,
+  IsDateString, IsIn, IsOptional, IsString, IsUUID, MaxLength, MinLength,
 } from 'class-validator';
 import { ListQuery } from '../common/pagination';
 import { JoiningRecord } from '../database/entities';
@@ -15,8 +15,9 @@ export class ApproveDto {
   @IsOptional() @IsString() @MaxLength(2000) remarks?: string;
 }
 
-export class NotJoinedDto {
-  @IsString() @MaxLength(2000) remarks: string;
+/** Rejecting a selected candidate at joining, or reopening a rejection made by mistake, needs a recorded reason. */
+export class ReasonDto {
+  @IsString() @MinLength(3, { message: 'Give a reason of at least 3 characters.' }) @MaxLength(2000) remarks: string;
 }
 
 export class JoinedQuery extends ListQuery {

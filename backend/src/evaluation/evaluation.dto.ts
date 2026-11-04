@@ -1,6 +1,6 @@
 import { Type } from 'class-transformer';
 import {
-  ArrayMinSize, IsArray, IsBoolean, IsDateString, IsIn, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min,
+  ArrayMinSize, IsArray, IsBoolean, IsDateString, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Max, MaxLength, Min,
 } from 'class-validator';
 import { STAGE_TYPES, StageType } from '../database/entities';
 
@@ -9,6 +9,8 @@ export const DECISIONS = ['Pending', 'Selected', 'Not Selected', 'On Hold'];
 export class StageDto {
   @IsOptional() @IsDateString() scheduledAt?: string | null;
   @IsOptional() @IsString() @MaxLength(200) location?: string | null;
+  @IsOptional() @IsString() @MaxLength(500) panel?: string | null;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(5) @Max(600) durationMinutes?: number | null;
   @IsOptional() @IsIn(['Present', 'Absent', 'Not Recorded']) attendance?: 'Present' | 'Absent' | 'Not Recorded';
   @IsOptional() @IsIn(DECISIONS) result?: any;
 }
@@ -17,7 +19,16 @@ export class ScheduleDto {
   @IsArray() @ArrayMinSize(1) @IsUUID('all', { each: true }) applicationIds: string[];
   @IsIn(STAGE_TYPES as unknown as string[]) stageType: StageType;
   @IsDateString() scheduledAt: string;
-  @IsOptional() @IsString() location?: string;
+  @IsOptional() @IsString() @MaxLength(200) location?: string;
+  @IsOptional() @IsString() @MaxLength(500) panel?: string;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(5) @Max(600) durationMinutes?: number;
+}
+
+/** Interview Board filters; every list is limited to the user's coordinated vacancies unless they see all. */
+export class InterviewBoardQuery {
+  @IsOptional() @IsUUID() departmentId?: string;
+  @IsOptional() @IsUUID() vacancyId?: string;
+  @IsOptional() @IsString() @MaxLength(100) q?: string;
 }
 
 export class MarkDto {

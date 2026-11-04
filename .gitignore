@@ -24,5 +24,6 @@ backups/
 *.sqlite
 *.sqlite3
 
-# Uploaded CVs, attachments and email outbox
+# Uploaded CVs, attachments, email outbox and saved CV mails
 storage/
+mail-inbox/

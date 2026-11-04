@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { FormView } from '@/components/FormView';
 import { Alert, Badge, Button, Card, ConfirmDialog, Field, LinkButton, Loaded, Modal, PageHeader, Select, Table, Td, Textarea, useAction, useLoad } from '@/components/ui';
-import { api, fmtDateTime, reqStatusLabel } from '@/lib/api';
+import { api, approvalStep, fmtDateTime, reqStatusLabel } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
 type Dialog = null | 'approve' | 'reject' | 'return' | 'cancel';
@@ -115,16 +115,16 @@ export default function RequisitionDetailPage() {
                     <div key={v} className="mb-4 last:mb-0">
                       <div className="mb-1 text-xs font-semibold text-muted">Submission version {v}{v === r.version ? ' (current)' : ''}</div>
                       <ol className="space-y-2">
-                        {r.approvals.filter((a: any) => a.version === v).map((a: any) => (
+                        {r.approvals.filter((a: any) => a.version === v).map((a: any) => { const s = approvalStep(a, r.approvals); return (
                           <li key={a.id} className="rounded border border-line p-2 text-sm">
-                            <div className="flex items-center justify-between gap-2"><span className="font-medium">{a.stepOrder}. {a.stepLabel}</span><Badge>{a.status}</Badge></div>
-                            <div className="text-xs text-muted">{a.approver.name}{a.actedBy ? ` · recorded by ${a.actedBy.name} on behalf` : ''}{a.decidedAt ? ` · ${fmtDateTime(a.decidedAt)}` : ''}{a.carriedOver ? ' · carried forward' : ''}</div>
-                            {a.remarks && <div className="mt-1 text-xs italic">“{a.remarks}”</div>}
+                            <div className="flex items-center justify-between gap-2"><span className="font-medium">{a.stepOrder}. {a.stepLabel}</span><Badge>{s.status}</Badge></div>
+                            <div className="text-xs text-muted">{a.approver.name}{a.actedBy ? ` · recorded by ${a.actedBy.name} on behalf` : ''}{s.decidedAt ? ` · ${fmtDateTime(s.decidedAt)}` : ''}{a.carriedOver ? ' · carried forward' : ''}</div>
+                            {s.note && <div className="mt-1 text-xs italic">“{s.note}”</div>}
                             {a.documents?.map((doc: any) => (
                               <a key={doc.id} className="mt-1 block text-xs text-brand-700 hover:underline" target="_blank" href={`/api/requisitions/${id}/attachments/${doc.id}`}>📎 {doc.originalName}</a>
                             ))}
                           </li>
-                        ))}
+                        ); })}
                       </ol>
                     </div>
                   ))}

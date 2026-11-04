@@ -10,12 +10,17 @@ import {
   AuditService, diff, IdService, NotificationService, StorageService, validateUpload,
 } from '../common/services';
 import {
-  JobPost, REQ_STATUS, Requisition, ScreeningCriteriaSet, ScreeningCriterion, User, Vacancy,
+  JobPost, REQ_STATUS, Requisition, User, Vacancy,
 } from '../database/entities';
-import { CriteriaSetDto, DirectVacancyDto, HrQueueQuery, JobPostDto, VacancyListQuery, VacancyUpdateDto } from './vacancies.dto';
+import { DirectVacancyDto, HrQueueQuery, JobPostDto, VacancyListQuery, VacancyUpdateDto } from './vacancies.dto';
 import { buildCircular, circularPdf, circularText } from './circular';
+import { specializationItems } from '../screening/screening.engine';
 
-export const NUMERIC_FIELDS = ['cgpa', 'totalExperienceYears', 'relevantExperienceYears', 'expectedSalary', 'age'];
+/** What CVs of a vacancy are screened against: the requisition's "Specialization required", or a Direct HR vacancy's own. */
+const screeningBasis = (v: Pick<Vacancy, 'specialization'>, r: Requisition | null) => {
+  const specialization = r ? r.specialization : v.specialization;
+  return { source: r ? 'REQUISITION' : 'VACANCY', reqNo: r?.reqNo ?? null, specialization: specialization ?? null, items: specializationItems(specialization) };
+};
 
 @Injectable()
 export class VacancyService {
@@ -129,7 +134,8 @@ export class VacancyService {
     if (dto.coordinatorId && !me.permissions.has(P.COORDINATOR_ASSIGN)) throw new ForbiddenException('You do not have permission to assign a coordinator.');
     return this.ds.transaction(async (m) => {
       const coordinator = dto.coordinatorId ? await this.eligibleCoordinator(m, dto.coordinatorId) : null;
-      const v = m.create(Vacancy, { ...dto, coordinatorId: coordinator?.id ?? null, positionId: dto.positionId ?? null, source: 'DIRECT_HR', requisitionId: null, vacancyNo: await this.ids.next(m, 'VAC'), status: 'Open', createdById: me.id });
+      const specialization = dto.specialization?.trim() || null;
+      const v = m.create(Vacancy, { ...dto, specialization, specializationVersion: specialization ? 1 : 0, coordinatorId: coordinator?.id ?? null, positionId: dto.positionId ?? null, source: 'DIRECT_HR', requisitionId: null, vacancyNo: await this.ids.next(m, 'VAC'), status: 'Open', createdById: me.id });
       await m.save(v);
       await this.audit.log(m, me, 'vacancy.create_direct', 'Vacancy', v.id, { label: v.vacancyNo, new: { ...dto } });
       if (coordinator) {
@@ -175,15 +181,23 @@ export class VacancyService {
     return {
       ...v, requisition: v.requisition ? { id: v.requisition.id, reqNo: v.requisition.reqNo, status: v.requisition.status } : null,
       coordinator: v.coordinator ? { id: v.coordinator.id, name: v.coordinator.name } : null,
+      screening: screeningBasis(v, v.requisition),
     };
   }
 
-  async update(id: string, dto: VacancyUpdateDto, me: AuthUser) {
+  async update(id: string, body: VacancyUpdateDto, me: AuthUser) {
+    // Only the fields the request sent: a validated DTO also carries the others as undefined, which would read as cleared.
+    const dto = Object.fromEntries(Object.entries(body).filter(([, val]) => val !== undefined)) as VacancyUpdateDto;
     await assertVacancyAccess(this.ds, me, id);
     return this.ds.transaction(async (m) => {
       const v = await m.findOne(Vacancy, { where: { id }, lock: { mode: 'pessimistic_write' } });
       if (!v) throw new NotFoundException();
-      const d = diff(v, { ...v, ...dto }, ['status', 'remarks']);
+      if (dto.specialization !== undefined) {
+        if (v.source !== 'DIRECT_HR') throw new BadRequestException('This vacancy is screened against the Specialization required of its approved requisition, which cannot be changed here.');
+        dto.specialization = dto.specialization?.trim() || null;
+        if (dto.specialization !== v.specialization) v.specializationVersion += 1;
+      }
+      const d = diff(v, { ...v, ...dto }, ['status', 'remarks', 'specialization']);
       Object.assign(v, dto, { updatedById: me.id });
       await m.save(v);
       if (d.changed.length) await this.audit.log(m, me, d.changed.includes('status') ? 'vacancy.status_change' : 'vacancy.update', 'Vacancy', id, { label: v.vacancyNo, ...d });
@@ -218,10 +232,10 @@ export class VacancyService {
 
   async getJobPost(id: string, me: AuthUser) {
     await assertJobPostAccess(this.ds, me, id);
-    const jp = await this.ds.getRepository(JobPost).findOne({ where: { id }, relations: { vacancy: { department: true, company: true } } });
+    const jp = await this.ds.getRepository(JobPost).findOne({ where: { id }, relations: { vacancy: { department: true, company: true, requisition: true } } });
     if (!jp) throw new NotFoundException('Job post not found.');
-    const sets = await this.ds.getRepository(ScreeningCriteriaSet).find({ where: { jobPostId: id }, order: { version: 'DESC', criteria: { sortOrder: 'ASC' } } });
-    return { ...jp, criteriaSets: sets, currentCriteria: sets.find((s) => s.version === jp.currentCriteriaVersion) ?? null };
+    const { requisition, ...vacancy } = jp.vacancy;
+    return { ...jp, vacancy, screening: screeningBasis(vacancy, requisition) };
   }
 
   async updateJobPost(id: string, dto: JobPostDto, me: AuthUser) {
@@ -247,39 +261,11 @@ export class VacancyService {
       const allowed: Record<string, string[]> = { Draft: ['Published', 'Cancelled'], Published: ['Closed', 'Cancelled'], Closed: ['Published'], Cancelled: [] };
       if (jp.status === status) return jp;
       if (!allowed[jp.status].includes(status)) throw new ConflictException(`Cannot change job post from ${jp.status} to ${status}.`);
-      if (status === 'Published' && !jp.currentCriteriaVersion) throw new ConflictException('Configure screening criteria before publishing.');
       const old = jp.status;
       jp.status = status;
       await m.save(jp);
       await this.audit.log(m, me, 'jobpost.status_change', 'JobPost', id, { label: jp.jobNo, old: { status: old }, new: { status } });
       return jp;
-    });
-  }
-
-  /** Saves a NEW immutable criteria version; older screening runs keep pointing to their version (AC-16). */
-  async saveCriteria(jobPostId: string, dto: CriteriaSetDto, me: AuthUser) {
-    await assertJobPostAccess(this.ds, me, jobPostId);
-    for (const c of dto.criteria) {
-      if (['gte', 'lte', 'eq'].includes(c.operator) && Number.isNaN(Number(c.value))) {
-        throw new BadRequestException(`Criterion "${c.label}": value must be a number for operator ${c.operator}.`);
-      }
-      if (['gte', 'lte', 'eq'].includes(c.operator) && !NUMERIC_FIELDS.includes(c.field)) {
-        throw new BadRequestException(`Criterion "${c.label}": numeric comparison is not valid for field ${c.field}.`);
-      }
-    }
-    return this.ds.transaction(async (m) => {
-      const jp = await m.findOne(JobPost, { where: { id: jobPostId }, lock: { mode: 'pessimistic_write' } });
-      if (!jp) throw new NotFoundException('Job post not found.');
-      const version = jp.currentCriteriaVersion + 1;
-      const set = m.create(ScreeningCriteriaSet, {
-        jobPostId, version, note: dto.note ?? null, createdById: me.id,
-        criteria: dto.criteria.map((c, i) => m.create(ScreeningCriterion, { ...c, sortOrder: i })),
-      });
-      await m.save(set);
-      jp.currentCriteriaVersion = version;
-      await m.save(jp);
-      await this.audit.log(m, me, 'criteria.new_version', 'JobPost', jobPostId, { label: `${jp.jobNo} v${version}`, new: { version, criteria: dto.criteria } as any });
-      return set;
     });
   }
 

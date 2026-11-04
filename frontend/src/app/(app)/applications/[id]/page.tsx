@@ -7,14 +7,18 @@ import { Alert, Badge, Button, Card, DL, Field, Input, Loaded, PageHeader, Table
 import { api, fmtDate, fmtDateTime, show } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
-const EDIT_FIELDS: [string, string, 'text' | 'number'][] = [
+const EDIT_FIELDS: [string, string, 'text' | 'number' | 'long'][] = [
   ['name', 'Candidate name', 'text'], ['email', 'Email', 'text'], ['phone', 'Phone', 'text'],
-  ['degree', 'Degree', 'text'], ['education', 'Education', 'text'], ['institution', 'Institution', 'text'],
+  ['degree', 'Degree', 'text'], ['specialization', 'Education specialization', 'text'], ['education', 'Education', 'text'], ['institution', 'Institution', 'text'],
   ['cgpaRaw', 'CGPA (as written)', 'text'], ['cgpa', 'CGPA (normalised, /4)', 'number'],
   ['totalExperienceYears', 'Total experience (yrs)', 'number'], ['relevantExperienceYears', 'Relevant experience (yrs)', 'number'],
-  ['workplace', 'Workplace', 'text'], ['skills', 'Skills / specialization', 'text'], ['expectedSalary', 'Expected salary', 'text'], ['age', 'Age', 'number'],
+  ['lastPosition', 'Last position', 'text'], ['workplace', 'Last organization', 'text'], ['skills', 'Skills', 'text'],
+  ['previousJobs', 'Previous jobs & designations', 'long'], ['certifications', 'Certifications', 'long'], ['address', 'Address', 'long'],
+  ['expectedSalary', 'Expected salary', 'text'], ['age', 'Age', 'number'],
 ];
-const STAGE_LABEL: Record<string, string> = { WRITTEN: 'Written exam', INTERVIEW: 'Interview', VIVA: 'Viva' };
+const runBasis = (r: any) => (r.basis === 'REQUISITION' ? `Specialization required (requisition v${r.criteriaVersion})`
+  : r.basis === 'VACANCY' ? `Specialization required (vacancy v${r.criteriaVersion})` : `job post criteria v${r.criteriaVersion}`);
+const STAGE_LABEL: Record<string, string> = { WRITTEN: 'Written exam', INTERVIEW: 'Interview board (viva)', OPTIONAL: 'Optional exam' };
 
 export default function ApplicationPage() {
   const { id } = useParams<{ id: string }>();
@@ -101,14 +105,16 @@ export default function ApplicationPage() {
                     {edit ? (
                       <>
                         <div className="grid gap-3 sm:grid-cols-2">
-                          {EDIT_FIELDS.map(([k, l, t]) => <Field key={k} label={l}><Input type={t} step={t === 'number' ? '0.01' : undefined} value={edit[k]} onChange={(e) => setEdit({ ...edit, [k]: e.target.value })} /></Field>)}
+                          {EDIT_FIELDS.map(([k, l, t]) => <Field key={k} label={l}>{t === 'long'
+                            ? <Textarea rows={3} value={edit[k]} onChange={(e) => setEdit({ ...edit, [k]: e.target.value })} />
+                            : <Input type={t} step={t === 'number' ? '0.01' : undefined} value={edit[k]} onChange={(e) => setEdit({ ...edit, [k]: e.target.value })} />}</Field>)}
                         </div>
                         <div className="mt-3 flex justify-end gap-2"><Button variant="secondary" onClick={() => setEdit(null)}>Cancel</Button><Button busy={act.busy} onClick={saveEdit}>Save corrections</Button></div>
                       </>
                     ) : (
                       <DL items={EDIT_FIELDS.map(([k, l]) => {
                         const v = ['name', 'email', 'phone'].includes(k) ? a.candidate[k] : a[k];
-                        return [l, v === null || v === undefined || v === '' ? <span className="text-amber-700">Review required</span> : String(v)] as [string, React.ReactNode];
+                        return [l, v === null || v === undefined || v === '' ? <span className="text-amber-700">Review required</span> : <span className="whitespace-pre-line">{String(v)}</span>] as [string, React.ReactNode];
                       })} />
                     )}
                   </Card>
@@ -126,11 +132,11 @@ export default function ApplicationPage() {
 
             {tab === 'screening' && (
               <div className="space-y-4">
-                {!run ? <Alert tone="info">Not screened yet{a.jobPost ? '' : ' — the vacancy has no job post with criteria'}.</Alert> : (
-                  <Card title={<>Latest screening · criteria v{run.criteriaVersion} · {fmtDateTime(run.createdAt)}</>} actions={<Badge>{run.overallResult}</Badge>} pad={false}>
+                {!run ? <Alert tone="info">Not screened yet. CVs are screened against the Specialization required of the requisition, or of a Direct HR vacancy; without it they are not screened.</Alert> : (
+                  <Card title={<>Latest screening · {runBasis(run)} · {fmtDateTime(run.createdAt)}</>} actions={<Badge>{run.overallResult}</Badge>} pad={false}>
                     <Table head={['Criterion', 'Type', 'Expected', 'Found in CV', 'Outcome', 'Reason']}>
                       {run.results.map((c: any) => (
-                        <tr key={c.criterionId}><Td>{c.label}</Td><Td>{c.mandatory ? 'Mandatory' : 'Preferred'}</Td><Td className="text-xs">{c.operator} {c.expected}</Td>
+                        <tr key={c.criterionId}><Td>{c.label}</Td><Td>{c.mandatory ? 'Mandatory' : 'Preferred'}</Td><Td className="text-xs">{c.operator === 'mentions' ? 'written in CV:' : c.operator} {c.expected}</Td>
                           <Td className="text-xs">{show(c.actual, 'missing')}</Td><Td><Badge tone={c.outcome === 'Pass' ? 'green' : c.outcome === 'Fail' ? 'red' : 'amber'}>{c.outcome}</Badge></Td><Td className="text-xs">{c.reason}</Td></tr>
                       ))}
                     </Table>
@@ -139,8 +145,8 @@ export default function ApplicationPage() {
                 {a.shortlisted && <Alert tone="info">HR shortlisted this application on {fmtDateTime(a.shortlistedAt)}{a.shortlistReason ? ` with override reason: “${a.shortlistReason}”` : ''}. The automated screening result above is unchanged.</Alert>}
                 {a.screeningRuns.length > 1 && (
                   <Card title="Earlier screening runs" pad={false}>
-                    <Table head={['When', 'Criteria version', 'Result']}>
-                      {a.screeningRuns.slice(1).map((r: any) => <tr key={r.id}><Td className="text-xs">{fmtDateTime(r.createdAt)}</Td><Td>v{r.criteriaVersion}</Td><Td><Badge>{r.overallResult}</Badge></Td></tr>)}
+                    <Table head={['When', 'Screened against', 'Result']}>
+                      {a.screeningRuns.slice(1).map((r: any) => <tr key={r.id}><Td className="text-xs">{fmtDateTime(r.createdAt)}</Td><Td>{runBasis(r)}</Td><Td><Badge>{r.overallResult}</Badge></Td></tr>)}
                     </Table>
                   </Card>
                 )}

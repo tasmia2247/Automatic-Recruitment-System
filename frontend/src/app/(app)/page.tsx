@@ -1,11 +1,10 @@
 'use client';
 
-import Link from 'next/link';
 import { Card, Empty, Loaded, PageHeader, Stat, Table, Td, useLoad } from '@/components/ui';
 import { api, fmtDateTime } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
-const STAGE_LABEL: Record<string, string> = { WRITTEN: 'Written exam', INTERVIEW: 'Interview', VIVA: 'Viva' };
+const STAGE_LABEL: Record<string, string> = { WRITTEN: 'Written exam', INTERVIEW: 'Interview board', OPTIONAL: 'Optional exam' };
 
 function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
@@ -103,10 +102,10 @@ export default function Dashboard() {
             )}
 
             {can(P.MONITOR_VIEW) && (d.failedJobs > 0 || d.failedEmails > 0) && (
-              <Card title="Processing issues" actions={<Link className="text-sm text-brand-700 hover:underline" href="/admin/monitor">Open monitor</Link>}>
+              <Card title="Processing issues">
                 <div className="grid grid-cols-2 gap-3">
-                  <Stat label="Failed background jobs" value={d.failedJobs} tone="red" href="/admin/monitor?status=Failed" />
-                  <Stat label="Failed emails" value={d.failedEmails} tone="red" />
+                  <Stat label="Failed background jobs" value={d.failedJobs} tone="red" hint="A CV that could not be read shows its error in the vacancy's candidate list" />
+                  <Stat label="Failed emails" value={d.failedEmails} tone="red" hint="Retry from the vacancy's Emails tab" />
                 </div>
               </Card>
             )}

@@ -121,17 +121,17 @@ export const DEFAULT_ROLES: { code: string; name: string; description: string; p
   {
     code: 'CV_SCREENER', name: 'CV Screening User',
     description: 'Review extracted fields, screening results and candidate remarks.',
-    permissions: [P.VACANCY_VIEW, P.CANDIDATE_VIEW, P.CANDIDATE_EDIT, P.CV_DOWNLOAD, P.SCREENING_RUN, P.RECRUITMENT_ALL],
+    permissions: [P.VACANCY_VIEW, P.CANDIDATE_VIEW, P.CANDIDATE_EDIT, P.CV_DOWNLOAD, P.SCREENING_RUN],
   },
   {
     code: 'EXAMINER', name: 'Interview / Examiner',
     description: 'Attendance and exam/interview/viva marks.',
-    permissions: [P.VACANCY_VIEW, P.CANDIDATE_VIEW, P.CV_DOWNLOAD, P.ATTENDANCE, P.MARKS_ENTER, P.MARKS_IMPORT, P.RECRUITMENT_ALL],
+    permissions: [P.VACANCY_VIEW, P.CANDIDATE_VIEW, P.CV_DOWNLOAD, P.ATTENDANCE, P.MARKS_ENTER, P.MARKS_IMPORT],
   },
   {
     code: 'READ_ONLY', name: 'Read-only User',
     description: 'View authorized records and reports; no create/edit/approve.',
-    permissions: [P.MASTER_VIEW, P.QUOTA_VIEW, P.REQ_VIEW, P.VACANCY_VIEW, P.CANDIDATE_VIEW, P.JOINING_VIEW, P.JOINED_VIEW, P.DASHBOARD_HR, P.RECRUITMENT_ALL],
+    permissions: [P.MASTER_VIEW, P.QUOTA_VIEW, P.REQ_VIEW, P.VACANCY_VIEW, P.CANDIDATE_VIEW, P.JOINING_VIEW, P.JOINED_VIEW, P.DASHBOARD_HR],
   },
   {
     code: 'SUPER_ADMIN', name: 'Super Admin',
