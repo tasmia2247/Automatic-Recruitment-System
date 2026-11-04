@@ -1,6 +1,6 @@
-import { Body, Controller, Get, HttpCode, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { Repository } from 'typeorm';
 import { config } from '../config';
 import { AUTH_COOKIE, AuthUser, CurrentUser, effectivePermissions, Public } from '../common/auth';
@@ -20,6 +20,12 @@ export function publicUser(u: User) {
   };
 }
 
+/** See config.cookieSecure. The web app proxies /api, and Next passes the browser's protocol on as X-Forwarded-Proto. */
+function cookieSecure(req: Request) {
+  if (config.cookieSecure !== 'auto') return config.cookieSecure === 'true';
+  return req.secure || String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https';
+}
+
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService, @InjectRepository(User) private readonly users: Repository<User>) {}
@@ -27,9 +33,9 @@ export class AuthController {
   @Public()
   @Post('login')
   @HttpCode(200)
-  async login(@Body() dto: LoginDto, @Res({ passthrough: true }) res: Response) {
+  async login(@Body() dto: LoginDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const { token, user } = await this.auth.login(dto.email, dto.password);
-    res.cookie(AUTH_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: config.env === 'production', path: '/' });
+    res.cookie(AUTH_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: cookieSecure(req), path: '/' });
     return { user: publicUser(user), permissions: [...effectivePermissions(user)] };
   }
 

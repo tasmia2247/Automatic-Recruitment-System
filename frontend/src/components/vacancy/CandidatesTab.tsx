@@ -2,14 +2,14 @@
 
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
-import { api, download, qs, show } from '@/lib/api';
+import { api, download, qs, show, uploadBatches } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 import { EmailComposer } from '../EmailComposer';
 import { Alert, Badge, Button, Card, ConfirmDialog, Input, Loaded, Pager, Select, Table, Td, useAction, useLoad } from '../ui';
 
 /** CV files the API accepts; anything else in a chosen folder is skipped. */
 const CV_EXTENSIONS = ['.pdf', '.docx', '.doc', '.txt'];
-/** Files per request when scanning a folder (the API takes up to 50). */
+/** Most files per request when scanning a folder (the API takes up to 50); batches are also capped by size. */
 const FILES_PER_REQUEST = 20;
 const isCv = (f: File) => CV_EXTENSIONS.some((x) => f.name.toLowerCase().endsWith(x));
 
@@ -51,10 +51,11 @@ export function CandidatesTab({ vacancy }: { vacancy: any }) {
   const upload = async (files: File[]) => {
     const r = await act.run(async () => {
       const all: any[] = [];
-      for (let i = 0; i < files.length; i += FILES_PER_REQUEST) {
-        if (files.length > FILES_PER_REQUEST) setProgress(`Uploading ${Math.min(i + FILES_PER_REQUEST, files.length)} of ${files.length}…`);
+      const batches = uploadBatches(files, FILES_PER_REQUEST);
+      for (const batch of batches) {
+        if (batches.length > 1) setProgress(`Uploading ${all.length + batch.length} of ${files.length}…`);
         const fd = new FormData();
-        files.slice(i, i + FILES_PER_REQUEST).forEach((f) => fd.append('files', f, f.name));
+        batch.forEach((f) => fd.append('files', f, f.name));
         all.push(...(await api(`/vacancies/${vacancy.id}/cvs`, { form: fd })));
       }
       return all;

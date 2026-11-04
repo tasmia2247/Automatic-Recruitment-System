@@ -167,7 +167,8 @@ From the repo root:
 | --- | --- |
 | `npm run setup` | Install backend and frontend dependencies |
 | `npm run db:local` | Start bundled PostgreSQL on port **54329**; data in `backend/.pgdata`; creates `ars` and `ars_test` on first run |
-| `npm run migrate` | Run TypeORM migrations |
+| `npm run migrate` | Run TypeORM migrations (ts-node, from `src`) |
+| `npm run migrate:dist` / `npm run seed:dist` | The same from the compiled `dist`, for servers (README "Deploying to a server") |
 | `npm run seed` | Idempotent seed. It can bring back seeded records that were soft-deleted, so do not run it on a database with real data |
 | `npm run dev:api` / `npm run dev:web` | Watch-mode API (4000) / Next.js dev (3000) |
 | `npm run build` | Build backend, then frontend |
@@ -185,11 +186,11 @@ class to the next `17933000000NN` number, because generated timestamps sort **be
 
 `DATABASE_URL` and `JWT_SECRET` are required: the API, migrations and seed stop with an error without them. `seed` also needs `SEED_PASSWORD`. `npm run db:local` takes its password from `DATABASE_URL`. No credential has a default in the code. All other settings default in `backend/src/config/index.ts`.
 
-`NODE_ENV`, `PORT`, `WEB_URL`, `DATABASE_URL`, `JWT_SECRET`, `JWT_EXPIRES_IN` (8h), `SEED_PASSWORD`, `CAREER_EMAIL`,
+`NODE_ENV`, `PORT`, `WEB_URL`, `DATABASE_URL`, `JWT_SECRET`, `JWT_EXPIRES_IN` (8h), `COOKIE_SECURE` (`auto`: Secure only for HTTPS requests, read from `req.secure` or `X-Forwarded-Proto`; `true`/`false` force it), `SEED_PASSWORD`, `CAREER_EMAIL`,
 `STORAGE_DIR` (`./storage`, relative to `backend/`), `MAIL_INTAKE_DIR` (`./mail-inbox`, relative to `backend/`), `MAX_UPLOAD_MB` (10), `ALLOWED_CV_EXTENSIONS` (pdf,docx,doc,txt),
 `ID_FORMAT_REQUISITION|VACANCY|JOBPOST|CANDIDATE|APPLICATION|IMPORT`, `SMTP_HOST|PORT|SECURE|USER|PASS`, `MAIL_FROM`,
 `WORKER_INTERVAL_MS` (3000), `WORKER_ENABLED`, `ALLOW_DIRECT_HR_VACANCY`, `REQUISITION_ID_ON` (`draft`|`submit`).
-Frontend: `API_URL` (`frontend/.env.local`, default `http://localhost:4000`). Tests: `TEST_DATABASE_URL`, otherwise `DATABASE_URL` with the database name swapped to `ars_test`.
+Frontend: `API_URL` (`frontend/.env.local`, default `http://localhost:4000`), read when the web app is **built** (rewrites are fixed at build time). Tests: `TEST_DATABASE_URL`, otherwise `DATABASE_URL` with the database name swapped to `ars_test`.
 
 Empty `SMTP_HOST` means emails are written to `backend/storage/outbox/*.eml` and **not delivered**; transport is recorded as `dev-outbox`.
 
@@ -215,6 +216,13 @@ candidates. That copy, its volumes and the root `.env` holding its password are 
 - The machine's installed PostgreSQL 18 service needs a password that is not available here; development uses `db:local`.
 - A database in another encoding rejects Bangla text. `local-db.js` forces UTF8, and the API logs an error on boot if the encoding is not UTF8.
 - Backup: database and storage folder together. Commands are in the README (AC-28).
+- **Deployment checks (2026-11-04):** before the `COOKIE_SECURE` setting, `NODE_ENV=production` always set a Secure cookie, so a plain-http
+  address could not stay signed in. The Next `/api` proxy forwarded only **10 MB** per request (`experimental.proxyClientMaxBodySize`,
+  now 100 MB) and cut larger CV / mail folder batches off with "socket hang up"; the pages now also batch uploads by size
+  (`uploadBatches`, 80 MB). `npm audit`: NestJS bundled multer 2.4.0 (DoS advisory); `overrides: { multer: "$multer" }` in
+  `backend/package.json` makes it use the patched direct dependency. The remaining moderate findings are the exceljs chain (uuid,
+  minimatch); npm's only fix is downgrading exceljs to 3.x, and the affected code paths are not used.
+- `npm ci` with `NODE_ENV=production` in the shell skips dev packages, and building, `npm run migrate` and `npm run seed` need them: use `--include=dev`.
 
 ---
 

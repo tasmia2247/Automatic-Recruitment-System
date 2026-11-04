@@ -22,6 +22,11 @@ export const config = {
   databaseUrl: required('DATABASE_URL'),
   jwtSecret: required('JWT_SECRET'),
   jwtExpiresIn: env('JWT_EXPIRES_IN', '8h'),
+  /**
+   * Secure flag of the sign-in cookie: 'auto' = only when the browser reached ARS over HTTPS (directly or via a proxy's
+   * X-Forwarded-Proto), so a plain-http office deployment can still sign in; 'true' / 'false' force it.
+   */
+  cookieSecure: env('COOKIE_SECURE', 'auto') as 'auto' | 'true' | 'false',
   storageDir: path.resolve(BACKEND_DIR, env('STORAGE_DIR', './storage')),
   /** HR saves CV mails here as .eml files; a scan reads them. */
   mailIntakeDir: path.resolve(BACKEND_DIR, env('MAIL_INTAKE_DIR', './mail-inbox')),

@@ -70,6 +70,77 @@ npm run setup
 
    Open http://localhost:3000. The web app proxies `/api/*` to the API (`API_URL` in `frontend/.env.local`, default `http://localhost:4000`).
 
+## Deploying to a server
+
+Checked on 2026-11-04 with a fresh copy of the repository: install from the lockfiles, build, migrate an empty database, seed.
+
+1. **Server:** Node 20+, PostgreSQL with a **UTF8** database, and a disk that is backed up for the CV files. Put HTTPS in
+   front of the web app if you can; open only the web app's port to users and keep port 4000 and PostgreSQL internal.
+
+2. **Install with the dev packages** (they are needed to build, migrate and seed). `--include=dev` matters when the
+   shell already has `NODE_ENV=production`, because npm then skips them:
+
+   ```bash
+   npm --prefix backend ci --include=dev
+   ```
+
+   ```bash
+   npm --prefix frontend ci --include=dev
+   ```
+
+3. **`backend/.env`** (never committed). Besides `DATABASE_URL`, `JWT_SECRET` (long, random, not the one used in testing)
+   and `SEED_PASSWORD`, set at least:
+
+   | Variable | Why |
+   | --- | --- |
+   | `NODE_ENV=production` | Production mode |
+   | `WEB_URL` | The address users open, e.g. `https://ars.ananta.local`; the API redirects there |
+   | `STORAGE_DIR`, `MAIL_INTAKE_DIR` | Absolute paths on the backed-up disk (CVs, attachments, the server mail folder) |
+   | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Without `SMTP_HOST` emails are **not delivered**, only written to the outbox folder |
+   | `CAREER_EMAIL` | "Send your CV to" on hiring circulars |
+   | `COOKIE_SECURE` | Default `auto`: the sign-in cookie is Secure only when users come over HTTPS, so a plain-http office address still works. `true` / `false` force it |
+
+4. **Web app address of the API.** `API_URL` (default `http://localhost:4000`) is read when the web app is **built**,
+   so set it in `frontend/.env.local` or the shell before building, e.g. `API_URL=http://127.0.0.1:4000`.
+
+5. **Build, migrate, seed.** The `:dist` commands run the compiled build:
+
+   ```bash
+   npm run build
+   ```
+
+   ```bash
+   npm run migrate:dist
+   ```
+
+   First installation only:
+
+   ```bash
+   npm run seed:dist
+   ```
+
+   The seed creates the roles, master data and the prototype accounts below, all with `SEED_PASSWORD`. Straight after, sign
+   in as `admin@ars.local`, change its password, and deactivate or re-password the other prototype accounts in
+   *Users & Roles*. Do not re-run the seed on live data without a reason: it resets the Super Admin role to all permissions.
+
+6. **Run** both under a service manager (PM2, NSSM, systemd) so they restart after a reboot:
+
+   ```bash
+   npm run start:api
+   ```
+
+   ```bash
+   npm run start:web
+   ```
+
+7. **Uploads.** The web app forwards up to 100 MB per request to the API (`next.config.ts`) and sends CV and mail folders
+   in batches below 80 MB. A reverse proxy in front (nginx, IIS) needs a body limit of at least that, e.g. nginx
+   `client_max_body_size 100m;`.
+
+8. **Check** `GET /api/health`, sign in, and open a CV preview. Set up the backup below before real CVs arrive.
+
+Updating later: pull, install as in step 2, then `npm run build`, `npm run migrate:dist`, and restart both services.
+
 ### Prototype accounts
 
 All seeded users share the password in `SEED_PASSWORD` (`backend/.env`). **Change it before any shared demo.**
@@ -109,9 +180,10 @@ through HTTP and asserts acceptance criteria **AC-01 … AC-27** (AC-28, backup/
 | Revised quota | Stays a proposal; applied to the quota list only when Corporate HR sets *Inserted in quota chart? = Yes* after full approval | Corporate HR panel on the requisition |
 | Mail intake | HR saves mails as `.eml` files, then chooses that folder on CV Bank → Unmatched CVs or uses the `backend/mail-inbox` folder, and scans. There is no live mailbox connection | `MAIL_INTAKE_DIR` |
 | CV formats / size | PDF, DOCX, DOC, TXT; 10 MB. DOC (legacy Word) and scanned PDFs are stored but marked *Failed* for manual review | `ALLOWED_CV_EXTENSIONS`, `MAX_UPLOAD_MB` |
-| CV extraction | Deterministic rules (`rules-1.0`); values only if literally present; GPA normalised only when on a /4 scale | `cv-extractor.ts` |
+| CV extraction | Deterministic rules (`rules-1.2`): contact, education, CGPA, experience, last position and organization, skills, address, certifications, previous jobs; values only if literally present; GPA normalised only when on a /4 scale | `cv-extractor.ts` |
 | Duplicate detection | Same normalised email, same phone (last 10 digits) or identical file → *flagged*; HR chooses merge / keep separate. Never auto-merged | `detectDuplicate()` |
-| Marks | Stored per stage (written / interview / viva) with evaluator & time; **no weighted total** until weighting is agreed | — |
+| Screening | Against the requisition's *Specialization required* (a Direct HR vacancy's own): every item written in the CV = Pass, otherwise Review Required | Requisition form, vacancy page |
+| Marks | Per exam (written exam, interview board, optional exam) with evaluator & time; written exam and interview board share one day; **no weighted total** until weighting is agreed | Interview Board |
 | Joining letter | Optional: template + letter status; sending never marks joined | Email templates |
 | Email | Individual sends via SMTP; when `SMTP_HOST` is empty messages go to `backend/storage/outbox/*.eml` and are labelled *dev outbox — not delivered* | `SMTP_*` |
 | Company names | Codes from the quota sheets; names marked *(confirm name)* | *Administration → Master Data* |

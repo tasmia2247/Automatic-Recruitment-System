@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Card, Input, Loaded, PageHeader, Pager, Select, Table, Td, useLoad } from '@/components/ui';
 import { api, fmtDateTime, qs } from '@/lib/api';
 
-const ENTITIES = ['Requisition', 'ApprovalRoute', 'ManpowerQuota', 'Vacancy', 'JobPost', 'Application', 'Candidate', 'ImportBatch', 'EmailTemplate', 'EmailBatch', 'User', 'Role', 'ProcessingJob'];
+const ENTITIES = ['Requisition', 'ApprovalRoute', 'ManpowerQuota', 'Vacancy', 'JobPost', 'Application', 'Candidate', 'IntakeMessage', 'ImportBatch', 'EmailTemplate', 'EmailBatch', 'Company', 'Department', 'Position', 'User', 'Role', 'PermissionTemplate', 'PermissionSetting', 'ProcessingJob'];
 
 const fmt = (v: unknown) => (v === null || v === undefined ? '∅' : typeof v === 'object' ? JSON.stringify(v) : String(v));
 

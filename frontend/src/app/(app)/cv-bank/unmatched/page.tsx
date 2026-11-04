@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from 'react';
 import { Alert, Badge, Button, Card, ConfirmDialog, Field, Loaded, PageHeader, Select, Table, Td, useAction, useLoad } from '@/components/ui';
-import { api, fmtDateTime } from '@/lib/api';
+import { api, fmtDateTime, uploadBatches } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
 const OUTCOME_TONE: Record<string, string> = { Added: 'green', Unmatched: 'orange', Duplicate: 'slate', Failed: 'red' };
@@ -70,10 +70,12 @@ export default function UnmatchedCvsPage() {
     if (!picked) return;
     const r = await scan.run(async () => {
       const total: any = { scanned: 0, cvsAdded: 0, remaining: 0, items: [] };
-      for (let i = 0; i < picked.mails.length; i += MAILS_PER_REQUEST) {
-        setProgress(`Scanning ${Math.min(i + MAILS_PER_REQUEST, picked.mails.length)} of ${picked.mails.length}…`);
+      let sent = 0;
+      for (const batch of uploadBatches(picked.mails, MAILS_PER_REQUEST)) {
+        sent += batch.length;
+        setProgress(`Scanning ${sent} of ${picked.mails.length}…`);
         const form = new FormData();
-        picked.mails.slice(i, i + MAILS_PER_REQUEST).forEach((f) => form.append('files', f, f.name));
+        batch.forEach((f) => form.append('files', f, f.name));
         const part = await api('/intake/scan-files', { form });
         total.scanned += part.scanned;
         total.cvsAdded += part.cvsAdded;

@@ -73,6 +73,23 @@ export function approvalStep(a: any, steps: any[]) {
   return { status: 'Approved', note: `Approved by ${m[1]} (final approval)`, decidedAt: final?.decidedAt ?? null };
 }
 
+/** Most bytes one upload request carries; kept under the /api proxy limit in next.config.ts (100 MB). */
+export const UPLOAD_BATCH_BYTES = 80 * 1024 * 1024;
+
+/** Splits files into upload requests of at most `maxFiles` files and UPLOAD_BATCH_BYTES bytes (a bigger single file goes alone). */
+export function uploadBatches<T extends { size: number }>(files: T[], maxFiles: number): T[][] {
+  const out: T[][] = [];
+  let cur: T[] = [];
+  let bytes = 0;
+  for (const f of files) {
+    if (cur.length && (cur.length >= maxFiles || bytes + f.size > UPLOAD_BATCH_BYTES)) { out.push(cur); cur = []; bytes = 0; }
+    cur.push(f);
+    bytes += f.size;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+
 export const show = (v: unknown, empty = '—') => (v === null || v === undefined || v === '' ? empty : String(v));
 
 export function newKey() {

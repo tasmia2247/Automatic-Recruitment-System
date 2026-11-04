@@ -10,8 +10,10 @@
     "typeorm": "typeorm-ts-node-commonjs -d src/database/data-source.ts",
     "migration:generate": "npm run typeorm -- migration:generate",
     "migration:run": "npm run typeorm -- migration:run",
+    "migration:run:dist": "typeorm -d dist/database/data-source.js migration:run",
     "migration:revert": "npm run typeorm -- migration:revert",
     "seed": "ts-node src/database/seed.ts",
+    "seed:dist": "node dist/database/seed.js",
     "test": "jest --runInBand",
     "typecheck": "tsc --noEmit"
   },
@@ -84,5 +86,8 @@
     ],
     "testTimeout": 120000
   },
-  "description": "Ananta ARS - NestJS API"
+  "description": "Ananta ARS - NestJS API",
+  "overrides": {
+    "multer": "$multer"
+  }
 }
