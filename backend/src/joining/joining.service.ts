@@ -32,14 +32,23 @@ export class JoiningService {
   async pending(me: AuthUser) {
     const qb = this.base('Pending').orderBy('a.finalDecisionAt', 'ASC');
     this.scope(qb, me);
-    const rows = await qb.getMany();
-    return rows.map((j) => this.view(j));
+    return this.withSeats(await qb.getMany());
   }
 
   async rejected(me: AuthUser) {
     const qb = this.base('Rejected').orderBy('j.updatedAt', 'DESC');
     this.scope(qb, me);
-    return (await qb.getMany()).map((j) => this.view(j));
+    return this.withSeats(await qb.getMany());
+  }
+
+  /** Each row with its vacancy's headcount and approved joinings, so HR sees when the seats are already taken. */
+  private async withSeats(rows: JoiningRecord[]) {
+    const vacancyIds = [...new Set(rows.map((j) => j.application.vacancyId))];
+    const counts: { vacancyId: string; n: number }[] = vacancyIds.length ? await this.ds.query(
+      `SELECT a."vacancyId", count(*)::int AS n FROM joining_records jr JOIN applications a ON a.id = jr."applicationId"
+        WHERE jr.status = 'Approved' AND a."vacancyId" = ANY($1) GROUP BY a."vacancyId"`, [vacancyIds]) : [];
+    const joined = new Map(counts.map((c) => [c.vacancyId, c.n]));
+    return rows.map((j) => ({ ...this.view(j), headcount: j.application.vacancy.headcount, joinedCount: joined.get(j.application.vacancyId) ?? 0 }));
   }
 
   async joined(q: JoinedQuery, me: AuthUser) {
@@ -67,7 +76,7 @@ export class JoiningService {
       id: j.id, joiningDate: j.joiningDate, status: j.status, letterStatus: j.letterStatus, remarks: j.remarks, approvedAt: j.approvedAt, updatedAt: j.updatedAt,
       applicationId: a.id, applicationNo: a.applicationNo, candidateNo: a.candidate.candidateNo, name: a.candidate.name,
       email: a.candidate.email, phone: a.candidate.phone, finalDecision: a.finalDecision, finalDecisionAt: a.finalDecisionAt,
-      vacancyId: a.vacancy.id, vacancyNo: a.vacancy.vacancyNo, position: a.vacancy.positionTitle,
+      vacancyId: a.vacancy.id, vacancyNo: a.vacancy.vacancyNo, position: a.vacancy.positionTitle, vacancyStatus: a.vacancy.status,
       department: a.vacancy.department?.name, company: a.vacancy.company?.name,
     };
   }
@@ -94,14 +103,21 @@ export class JoiningService {
       if (j.status !== 'Pending') throw new ConflictException(`Joining record is ${j.status}.`);
       const app = await m.findOneOrFail(Application, { where: { id: j.applicationId } });
       if (app.finalDecision !== 'Selected') throw new ConflictException('Only final-selected candidates can be approved as joined.');
+      // The vacancy is locked before counting, so two approvals at once cannot both take the last seat.
+      const v = await m.findOneOrFail(Vacancy, { where: { id: app.vacancyId }, lock: { mode: 'pessimistic_write' } });
+      const countJoined = () => m.createQueryBuilder(JoiningRecord, 'jr').innerJoin(Application, 'a', 'a.id = jr.applicationId')
+        .where(`a.vacancyId = :v AND jr.status = 'Approved'`, { v: v.id }).getCount();
+      // No joining beyond the approved headcount (owner, 2026-11-05).
+      const before = await countJoined();
+      if (before >= v.headcount) {
+        throw new ConflictException(`All ${v.headcount} seat${v.headcount === 1 ? '' : 's'} of ${v.vacancyNo} are already filled (${before} joined), so no more joinings can be approved. Reject this candidate at joining, or raise a new requisition for more seats.`);
+      }
       Object.assign(j, { status: 'Approved', joiningDate: dto.joiningDate, remarks: dto.remarks ?? j.remarks, approvedById: me.id, approvedAt: new Date() });
       await m.save(j);
       await this.audit.log(m, me, 'joining.approve', 'Application', j.applicationId, { label: app.applicationNo, old: { status: 'Pending' }, new: { status: 'Approved', joiningDate: dto.joiningDate } });
 
       // Mark the vacancy Filled once approved joinings reach its headcount.
-      const v = await m.findOneOrFail(Vacancy, { where: { id: app.vacancyId }, lock: { mode: 'pessimistic_write' } });
-      const joinedCount = await m.createQueryBuilder(JoiningRecord, 'jr').innerJoin(Application, 'a', 'a.id = jr.applicationId')
-        .where(`a.vacancyId = :v AND jr.status = 'Approved'`, { v: v.id }).getCount();
+      const joinedCount = before + 1;
       if (joinedCount >= v.headcount && v.status !== 'Filled') {
         const old = v.status;
         v.status = 'Filled';

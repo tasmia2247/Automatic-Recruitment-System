@@ -107,6 +107,11 @@ export class EvaluationService {
       for (const t of targets) {
         let st = await m.findOne(CandidateStage, { where: { applicationId, stageType: t }, lock: { mode: 'pessimistic_write' } });
         const before = st ? { ...st } : {};
+        // A round starts only with a date, an attendance or a result. A venue, panel or duration alone (an empty slot dialog
+        // saved) creates nothing, because any round on record turns the candidate's status into Interview.
+        const starts = !!shared.scheduledAt || (shared.attendance !== undefined && shared.attendance !== 'Not Recorded')
+          || (t === stageType && dto.result !== undefined && dto.result !== 'Pending');
+        if (!st && !starts) continue;
         if (!st) st = m.create(CandidateStage, { applicationId, stageType: t });
         Object.assign(st, shared, t === stageType && dto.result !== undefined ? { result: dto.result } : {}, { updatedById: me.id });
         await m.save(st);
@@ -114,7 +119,7 @@ export class EvaluationService {
         if (d.changed.length) await this.audit.log(m, me, `stage.${t.toLowerCase()}.update`, 'Application', applicationId, { label: `${app.applicationNo} ${STAGE_LABEL[t]}`, old: d.old, new: d.new });
         if (t === stageType) requested = st;
       }
-      return requested!;
+      return requested;
     });
   }
 
@@ -155,21 +160,30 @@ export class EvaluationService {
 
   // ------------------------------------------------------------------ Excel marks import
 
-  async template(vacancyId: string, stageType: StageType) {
+  /**
+   * Marks template of a vacancy, filled with its shortlisted candidates. `MAIN` (owner, 2026-11-05) is the written exam and
+   * interview board in one sheet, a column each, since both are held on the same day; any other stage has one Marks column.
+   */
+  async template(vacancyId: string, stageType: StageType | 'MAIN') {
     const board = await this.board(vacancyId);
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Marks');
+    const marks = stageType === 'MAIN'
+      ? [{ header: 'Written Marks', key: 'written', width: 15 }, { header: 'Interview Marks', key: 'interview', width: 16 }]
+      : [{ header: 'Marks', key: 'marks', width: 10 }];
     ws.columns = [
       { header: 'Application ID', key: 'app', width: 20 }, { header: 'Candidate ID', key: 'cand', width: 14 },
-      { header: 'Candidate Name', key: 'name', width: 28 }, { header: 'Marks', key: 'marks', width: 10 }, { header: 'Remarks', key: 'remarks', width: 30 },
+      { header: 'Candidate Name', key: 'name', width: 32 }, ...marks, { header: 'Remarks', key: 'remarks', width: 30 },
     ];
     ws.getRow(1).font = { bold: true };
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
     for (const r of board.rows) ws.addRow({ app: r.applicationNo, cand: r.candidateNo, name: r.name ?? '' });
-    return { fileName: `${board.vacancy.vacancyNo}_${stageType}_marks_template.xlsx`, buffer: Buffer.from(await wb.xlsx.writeBuffer()) };
+    const safe = (s?: string) => (s ?? '').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '');
+    const kind = stageType === 'MAIN' ? 'written_interview' : stageType.toLowerCase();
+    return { fileName: `${board.vacancy.vacancyNo}_${safe(board.vacancy.department)}_${safe(board.vacancy.positionTitle)}_${kind}_marks.xlsx`, buffer: Buffer.from(await wb.xlsx.writeBuffer()) };
   }
 
-  /** Parses and validates; nothing is saved to marks until confirm() (SRS 13.4 / AC-20). */
-  async preview(vacancyId: string, file: Express.Multer.File, stageType: StageType, component: string, maxMarks: number | null, me: AuthUser) {
+  private async readSheet(file: Express.Multer.File) {
     if (!file) throw new BadRequestException('Upload an .xlsx file.');
     if (!/\.xlsx$/i.test(file.originalname)) throw new BadRequestException('Only .xlsx files are supported.');
     const wb = new ExcelJS.Workbook();
@@ -180,16 +194,60 @@ export class EvaluationService {
     }
     const ws = wb.worksheets[0];
     if (!ws) throw new BadRequestException('The workbook has no sheets.');
-
     const header = (ws.getRow(1).values as any[]).map((v) => String(v ?? '').trim());
     const find = (re: RegExp) => header.findIndex((h) => re.test(h));
-    const colApp = find(/^application\s*(id|no)/i);
-    const colCand = find(/^candidate\s*(id|no)/i);
-    const colName = find(/name/i);
-    const colMarks = find(/^marks?$|^score$|obtained/i);
-    if (colMarks < 0) throw new BadRequestException(`No "Marks" column found. Detected columns: ${header.filter(Boolean).join(', ')}`);
-    if (colApp < 0 && colCand < 0) throw new BadRequestException('The sheet needs an "Application ID" or "Candidate ID" column. Matching by name or row order is not allowed.');
+    const cols = { app: find(/^application\s*(id|no)/i), cand: find(/^candidate\s*(id|no)/i), name: find(/name/i), find };
+    if (cols.app < 0 && cols.cand < 0) throw new BadRequestException('The sheet needs an "Application ID" or "Candidate ID" column. Matching by name or row order is not allowed.');
+    return { ws, header, cols };
+  }
 
+  /** Parses and validates; nothing is saved to marks until confirm() (SRS 13.4 / AC-20). */
+  async preview(vacancyId: string, file: Express.Multer.File, stageType: StageType, component: string, maxMarks: number | null, me: AuthUser) {
+    const { ws, header, cols } = await this.readSheet(file);
+    const colMarks = cols.find(/^marks?$|^score$|obtained/i);
+    if (colMarks < 0) throw new BadRequestException(`No "Marks" column found. Detected columns: ${header.filter(Boolean).join(', ')}`);
+    const rows = await this.parseRows(vacancyId, ws, cols, colMarks, stageType, component, maxMarks, false);
+    if (!rows.length) throw new BadRequestException('No data rows found below the header.');
+    return this.saveBatch(vacancyId, file, ws, header, rows, stageType, component, maxMarks, me);
+  }
+
+  /**
+   * The written & interview sheet (owner, 2026-11-05): one file, two previews (one per exam), confirmed together. A blank cell
+   * means the mark is not entered yet and is left out, not an error; rows are still matched by ID only.
+   */
+  async previewMain(vacancyId: string, file: Express.Multer.File, max: { WRITTEN: number | null; INTERVIEW: number | null }, me: AuthUser) {
+    const { ws, header, cols } = await this.readSheet(file);
+    const columns = { WRITTEN: cols.find(/written/i), INTERVIEW: cols.find(/interview|viva/i) } as const;
+    if (columns.WRITTEN < 0 && columns.INTERVIEW < 0) {
+      throw new BadRequestException(`No "Written Marks" or "Interview Marks" column found. Download the written & interview template. Detected columns: ${header.filter(Boolean).join(', ')}`);
+    }
+    const batches = [];
+    for (const stage of ['WRITTEN', 'INTERVIEW'] as const) {
+      if (columns[stage] < 0) continue;
+      const rows = await this.parseRows(vacancyId, ws, cols, columns[stage], stage, 'Total', max[stage], true);
+      if (rows.length) batches.push(await this.saveBatch(vacancyId, file, ws, header, rows, stage, 'Total', max[stage], me));
+    }
+    if (!batches.length) throw new BadRequestException('No marks found in the Written Marks or Interview Marks column.');
+    return { batches };
+  }
+
+  private async saveBatch(vacancyId: string, file: Express.Multer.File, ws: ExcelJS.Worksheet, header: string[], rows: Partial<ImportRow>[], stageType: StageType, component: string, maxMarks: number | null, me: AuthUser) {
+    return this.ds.transaction(async (m) => {
+      const batch = m.create(ImportBatch, {
+        batchNo: await this.ids.next(m, 'IMP'), vacancyId, stageType, component, uploaderId: me.id, fileName: file.originalname,
+        sheetName: ws.name, detectedColumns: header.filter(Boolean), maxMarks, rowsTotal: rows.length,
+        rowsAccepted: rows.filter((r) => r.status !== 'Error').length, rowsRejected: rows.filter((r) => r.status === 'Error').length,
+        rowsOverwrite: rows.filter((r) => r.status === 'Overwrite').length,
+        rows: rows.map((r) => m.create(ImportRow, r)),
+      });
+      await m.save(batch);
+      await this.audit.log(m, me, 'marks.import_preview', 'ImportBatch', batch.id, { label: batch.batchNo, new: { file: batch.fileName, stage: stageType, rows: batch.rowsTotal, errors: batch.rowsRejected } });
+      return this.getBatch(batch.id, m);
+    });
+  }
+
+  private async parseRows(vacancyId: string, ws: ExcelJS.Worksheet, cols: { app: number; cand: number; name: number }, colMarks: number, stageType: StageType, component: string, maxMarks: number | null, skipBlank: boolean) {
+    const { app: colApp, cand: colCand, name: colName } = cols;
     const apps = await this.ds.getRepository(Application).find({ where: { vacancyId }, relations: { candidate: true } });
     const byApp = new Map(apps.map((a) => [a.applicationNo.toUpperCase(), a]));
     const byCand = new Map(apps.map((a) => [a.candidate.candidateNo.toUpperCase(), a]));
@@ -209,6 +267,7 @@ export class EvaluationService {
       const name = cell(row, colName);
       const raw = cell(row, colMarks);
       if (!appNo && !candNo && !raw && !name) return; // blank line
+      if (skipBlank && !raw) return; // this exam's mark not entered yet
       const errors: string[] = [];
       const app = appNo ? byApp.get(appNo) : candNo ? byCand.get(candNo) : undefined;
       if (!appNo && !candNo) errors.push('Missing Application ID / Candidate ID.');
@@ -230,20 +289,7 @@ export class EvaluationService {
         status: errors.length ? 'Error' : prev && prev.marks !== marks ? 'Overwrite' : 'Valid', errors,
       });
     });
-    if (!rows.length) throw new BadRequestException('No data rows found below the header.');
-
-    return this.ds.transaction(async (m) => {
-      const batch = m.create(ImportBatch, {
-        batchNo: await this.ids.next(m, 'IMP'), vacancyId, stageType, component, uploaderId: me.id, fileName: file.originalname,
-        sheetName: ws.name, detectedColumns: header.filter(Boolean), maxMarks, rowsTotal: rows.length,
-        rowsAccepted: rows.filter((r) => r.status !== 'Error').length, rowsRejected: rows.filter((r) => r.status === 'Error').length,
-        rowsOverwrite: rows.filter((r) => r.status === 'Overwrite').length,
-        rows: rows.map((r) => m.create(ImportRow, r)),
-      });
-      await m.save(batch);
-      await this.audit.log(m, me, 'marks.import_preview', 'ImportBatch', batch.id, { label: batch.batchNo, new: { file: batch.fileName, rows: batch.rowsTotal, errors: batch.rowsRejected } });
-      return this.getBatch(batch.id, m);
-    });
+    return rows;
   }
 
   async getBatch(id: string, m = this.ds.manager) {

@@ -1,4 +1,5 @@
 import { approvalStep, fmtDate, fmtDateTime, show } from '@/lib/api';
+import { SpecializationView } from './SpecializationFields';
 
 const yn = (v: boolean | null | undefined) => (v === null || v === undefined ? '—' : v ? 'Yes' : 'No');
 
@@ -50,7 +51,7 @@ export function FormView({ r }: { r: any }) {
         <Line label="Vacancy (Dept. / Designation)" value={<>{show(r.vacancyDept)} / {show(r.vacancyDesig)}{r.calculated?.overridden && <span className="ml-2 text-xs text-amber-700">(overridden: {r.vacancyOverrideReason})</span>}</>} />
         <Line label="Seats available" value={yn(r.seatsAvailable)} />
         <Line label="Deadline · Gender" value={`${r.deadlineDays ? `${r.deadlineDays} days` : '—'} · ${show(r.gender)}`} />
-        <Line label="Specialization required" value={show(r.specialization)} wide />
+        <Line label="Specialization required" value={<SpecializationView value={r} empty="—" />} wide />
         <Line label="JD of this position" value={show(r.jobDescription)} wide />
         <Line label="Background of the requirement" value={show(r.background)} wide />
       </div>

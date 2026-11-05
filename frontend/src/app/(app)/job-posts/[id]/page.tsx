@@ -6,6 +6,9 @@ import { Alert, Badge, Button, Card, ConfirmDialog, Field, Input, Loaded, PageHe
 import { api, download } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
+const LABELS: Record<string, string> = { education: 'Education', experienceRequirement: 'Experience', duties: 'Key responsibilities', skills: 'Required skills' };
+const FILLED_LABEL = (keys: string[]) => keys.map((k) => LABELS[k] ?? k).join(', ');
+
 export default function JobPostPage() {
   const { id } = useParams<{ id: string }>();
   const { can } = useAuth();
@@ -14,13 +17,19 @@ export default function JobPostPage() {
   const [statusDialog, setStatusDialog] = useState<string | null>(null);
   const [circularText, setCircularText] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [filled, setFilled] = useState<string[]>([]);
   const act = useAction();
   const editable = can(P.JOBPOST_EDIT);
 
   useEffect(() => {
     if (!state.data) return;
     const j = state.data;
-    setForm({ title: j.title, startDate: j.startDate ?? '', deadline: j.deadline ?? '', description: j.description ?? '', duties: j.duties ?? '', education: j.education ?? '', requiredDegree: j.requiredDegree ?? '', minCgpa: j.minCgpa ?? '', experienceRequirement: j.experienceRequirement ?? '', cvCollection: j.cvCollection ?? '', circularContent: j.circularContent ?? '', location: j.location ?? '', employmentType: j.employmentType ?? 'Full-time', jobShift: j.jobShift ?? '', salary: j.salary ?? '', skills: j.skills ?? '', applyEmail: j.applyEmail ?? '', emailSubject: j.emailSubject ?? '' });
+    const base: any = { title: j.title, startDate: j.startDate ?? '', deadline: j.deadline ?? '', description: j.description ?? '', duties: j.duties ?? '', education: j.education ?? '', requiredDegree: j.requiredDegree ?? '', minCgpa: j.minCgpa ?? '', experienceRequirement: j.experienceRequirement ?? '', cvCollection: j.cvCollection ?? '', circularContent: j.circularContent ?? '', location: j.location ?? '', employmentType: j.employmentType ?? 'Full-time', jobShift: j.jobShift ?? '', salary: j.salary ?? '', skills: j.skills ?? '', applyEmail: j.applyEmail ?? '', emailSubject: j.emailSubject ?? '' };
+    // A post that is still a draft takes the requisition's education, experience, JD and skills into the fields it left empty.
+    const empty = j.status === 'Draft' && editable ? Object.keys(j.prefill ?? {}).filter((k) => !String(base[k] ?? '').trim()) : [];
+    for (const k of empty) base[k] = j.prefill[k];
+    setFilled(empty);
+    setForm(base);
     api(`/job-posts/${j.id}/circular-file?format=txt`, { raw: true }).then((r: Response) => r.text()).then(setCircularText).catch(() => setCircularText(null));
   }, [state.data]);
 
@@ -46,7 +55,8 @@ export default function JobPostPage() {
               {['Draft', 'Published'].includes(j.status) && <Button variant="danger" onClick={() => setStatusDialog('Cancelled')}>Cancel post</Button>}
               </>}
             </>} />
-          <div className="mb-4 space-y-2"><Alert>{act.error}</Alert><Alert tone="success">{act.message}</Alert></div>
+          <div className="mb-4 space-y-2"><Alert>{act.error}</Alert><Alert tone="success">{act.message}</Alert>
+            {filled.length > 0 && <Alert tone="info">{FILLED_LABEL(filled)} filled in from the {j.vacancy.source === 'DIRECT_HR' ? 'vacancy' : 'requisition'}. Check them and click Save; the circular uses the saved details.</Alert>}</div>
           <div className="grid gap-4 lg:grid-cols-2">
             <Card title="Circular & requirements" actions={editable && <Button size="sm" busy={act.busy} onClick={savePost}>Save</Button>}>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -63,8 +73,8 @@ export default function JobPostPage() {
                 <Field label="Job shift"><Input value={form.jobShift} disabled={!editable} placeholder="e.g. Day and Night (optional)" onChange={(e) => setForm({ ...form, jobShift: e.target.value })} /></Field>
                 <Field label="Salary"><Input value={form.salary} disabled={!editable} placeholder="As per company policy" onChange={(e) => setForm({ ...form, salary: e.target.value })} /></Field>
                 <Field label="Send CVs to (email)" hint="Empty = the company career address."><Input type="email" value={form.applyEmail} disabled={!editable} placeholder="career@ananta.com.bd" onChange={(e) => setForm({ ...form, applyEmail: e.target.value })} /></Field>
-                <Field label="Email subject for applicants" hint={`${j.jobNo} is added automatically so emailed CVs reach this post.`}><Input value={form.emailSubject} disabled={!editable} placeholder={`Application for ${form.title}`} onChange={(e) => setForm({ ...form, emailSubject: e.target.value })} /></Field>
-                <Field label="CV submission method" className="sm:col-span-2" hint={`Email intake routes CVs whose subject contains ${j.jobNo}.`}><Input value={form.cvCollection} disabled={!editable} onChange={(e) => setForm({ ...form, cvCollection: e.target.value })} /></Field>
+                <Field label="Email subject for applicants" hint="Designation and department are enough: the mail scan matches emailed CVs to this post by them. Empty = the placeholder."><Input value={form.emailSubject} disabled={!editable} placeholder={form.title.toLowerCase().includes(j.vacancy.department.name.toLowerCase()) ? `Application for ${form.title}` : `Application for ${form.title} - ${j.vacancy.department.name}`} onChange={(e) => setForm({ ...form, emailSubject: e.target.value })} /></Field>
+                <Field label="CV submission method" className="sm:col-span-2" hint="How applicants should send their CV."><Input value={form.cvCollection} disabled={!editable} onChange={(e) => setForm({ ...form, cvCollection: e.target.value })} /></Field>
                 <Field label="Job description / purpose of the role" className="sm:col-span-2" hint="Printed as the introduction on the circular."><Textarea rows={4} value={form.description} disabled={!editable} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
                 <Field label="Key responsibilities" className="sm:col-span-2" hint="One per line; each line becomes a bullet."><Textarea rows={5} value={form.duties} disabled={!editable} onChange={(e) => setForm({ ...form, duties: e.target.value })} /></Field>
                 <Field label="Required skills" className="sm:col-span-2" hint="One per line."><Textarea rows={4} value={form.skills} disabled={!editable} onChange={(e) => setForm({ ...form, skills: e.target.value })} /></Field>
@@ -84,20 +94,12 @@ export default function JobPostPage() {
                 <Button size="sm" onClick={() => download(`/job-posts/${id}/circular-file?format=pdf&download=1`)}>Download PDF</Button>
                 <Button size="sm" variant="secondary" onClick={() => download(`/job-posts/${id}/circular-file?format=txt&download=1`)}>Download text</Button>
               </>}>
-                {j.status === 'Draft'
-                  ? <Alert tone="warning">Draft: the files are marked “not yet published”. Publish the job post to get the final circular.</Alert>
-                  : <p className="mb-2 text-xs text-muted">Generated from the saved job post details as a poster PDF and plain text (for job portals, email or social media).</p>}
-                <div className="mt-2 flex items-center justify-between"><span className="text-xs font-medium text-muted">Text version</span>
+                <p className="mb-2 text-xs text-muted">Generated from the saved job post details (empty fields come from the requisition) as a poster PDF and plain text for job portals, email or social media.{j.status === 'Draft' ? ' This post is still a draft: publish it when the circular is ready.' : ''}</p>
+                <iframe key={j.updatedAt} title="Circular preview" className="h-[640px] w-full rounded-md border border-line bg-white"
+                  src={`/api/job-posts/${id}/circular-file?format=pdf#view=FitH&toolbar=0`} />
+                <div className="mt-3 flex items-center justify-between"><span className="text-xs font-medium text-muted">Text version</span>
                   <Button size="sm" variant="ghost" disabled={!circularText} onClick={copyText}>{copied ? 'Copied' : 'Copy text'}</Button></div>
                 <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-slate-50 p-3 text-xs">{circularText ?? 'Loading…'}</pre>
-              </Card>
-              <Card title="Screening">
-                {j.screening.items.length ? (
-                  <>
-                    <p className="text-sm">CVs are screened against the <b>Specialization required</b> {j.screening.reqNo ? `of requisition ${j.screening.reqNo}` : 'of this Direct HR vacancy'}. A CV passes when every item below is written in it; otherwise it goes to Review Required for HR to check.</p>
-                    <ul className="mt-2 list-disc space-y-0.5 pl-5 text-sm">{j.screening.items.map((i: string) => <li key={i}>{i}</li>)}</ul>
-                  </>
-                ) : <Alert tone="warning">{j.screening.reqNo ? `Requisition ${j.screening.reqNo} has no Specialization required, so CVs are not screened.` : 'This Direct HR vacancy has no Specialization required yet, so CVs are not screened. Set it on the vacancy page.'}</Alert>}
               </Card>
             </div>
           </div>

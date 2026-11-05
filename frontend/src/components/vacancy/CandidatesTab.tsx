@@ -131,7 +131,7 @@ export function CandidatesTab({ vacancy }: { vacancy: any }) {
 
       <Alert tone={vacancy.screening?.items.length ? 'info' : 'warning'}>
         {vacancy.screening?.items.length
-          ? <>Screening checks the <b>Specialization required</b> {vacancy.screening.reqNo ? <>of requisition {vacancy.screening.reqNo}</> : 'of this Direct HR vacancy'}: {vacancy.screening.items.join(' · ')}. A CV passes when all of these are written in it; otherwise it goes to Review Required.</>
+          ? <>Screening checks the <b>Specialization required</b> {vacancy.screening.reqNo ? <>of requisition {vacancy.screening.reqNo}</> : 'of this Direct HR vacancy'}: {vacancy.screening.items.join(' · ')}. A CV passes when it meets all of these; otherwise it goes to Review Required with the reason.</>
           : vacancy.screening?.reqNo
             ? <>Requisition {vacancy.screening.reqNo} has no Specialization required, so CVs are not screened.</>
             : <>This Direct HR vacancy has no Specialization required yet, so CVs are not screened. Set it on the Overview tab.</>}
@@ -154,7 +154,7 @@ export function CandidatesTab({ vacancy }: { vacancy: any }) {
           <label className="flex items-center gap-1 text-sm"><input type="checkbox" checked={filters.shortlisted === 'true'} onChange={(e) => setF('shortlisted', e.target.checked ? 'true' : '')} className="accent-brand-600" /> Shortlisted only</label>
           <label className="flex items-center gap-1 text-sm"><input type="checkbox" checked={filters.duplicate === 'true'} onChange={(e) => setF('duplicate', e.target.checked ? 'true' : '')} className="accent-brand-600" /> Duplicate review</label>
           <div className="flex-1" />
-          {can(P.SCREENING_RUN) && <Button size="sm" variant="secondary" onClick={() => act.run(() => api(`/vacancies/${vacancy.id}/rescreen`, { method: 'POST' }), (r: any) => `${r.queued} application(s) queued for re-screening against the requisition's Specialization required.`).then(() => setTimeout(state.reload, 1500))}>Re-run screening</Button>}
+          {can(P.SCREENING_RUN) && <Button size="sm" variant="secondary" onClick={() => act.run(() => api(`/vacancies/${vacancy.id}/rescreen`, { method: 'POST' }), (r: any) => `${r.queued} application(s) queued for re-screening against the Specialization required.`).then(() => setTimeout(state.reload, 1500))}>Re-run screening</Button>}
           {can(P.EXPORT) && <Button size="sm" variant="secondary" onClick={() => act.run(() => download(`/vacancies/${vacancy.id}/export${qs({ result: filters.result })}`))}>Export Excel</Button>}
         </div>
         {selected.size > 0 && (

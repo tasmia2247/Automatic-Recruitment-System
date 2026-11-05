@@ -1,5 +1,5 @@
 import { Column, Entity, Index, JoinColumn, ManyToOne, OneToMany } from 'typeorm';
-import { BaseEntity } from './base';
+import { BaseEntity, numeric } from './base';
 import { User } from './identity.entities';
 import { Company, Department, Position } from './master.entities';
 
@@ -108,7 +108,12 @@ export class Requisition extends BaseEntity {
   @Column({ type: 'varchar', length: 10, nullable: true })
   gender: 'Male' | 'Female' | 'Any' | null;
 
+  /** 'Specialization required', what CVs are screened against. `specialization` holds 'Other requirements'. */
+  @Column({ type: 'text', nullable: true }) requiredEducation: string | null;
+  @Column({ type: 'text', nullable: true }) requiredSkills: string | null;
+  @Column({ type: 'numeric', precision: 4, scale: 1, nullable: true, transformer: numeric }) requiredExperienceYears: number | null;
   @Column({ type: 'text', nullable: true }) specialization: string | null;
+  /** Roles and responsibilities; not used for screening. */
   @Column({ type: 'text', nullable: true }) jobDescription: string | null;
   @Column({ type: 'text', nullable: true }) background: string | null;
 

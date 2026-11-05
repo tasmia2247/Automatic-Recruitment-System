@@ -19,7 +19,7 @@ export default function ApprovalsPage() {
                   <Table head={['Requisition', 'Step', 'Department', 'Company', 'Rank', 'How many', 'Requester', 'Submitted', '']}>
                     {d.all.map((p: any) => (
                       <tr key={p.actionId} className="hover:bg-slate-50">
-                        <Td><Link className="font-medium text-brand-700 hover:underline" href={`/requisitions/${p.requisition.id}`}>{p.requisition.reqNo}</Link></Td>
+                        <Td><Link className="font-medium text-brand-700 hover:underline" href={`/approvals/${p.requisition.id}`}>{p.requisition.reqNo}</Link></Td>
                         <Td className="whitespace-nowrap">{p.stepOrder} of {p.totalSteps}</Td>
                         <Td>{p.requisition.department?.name}</Td>
                         <Td>{p.requisition.company?.code}</Td>
@@ -27,7 +27,7 @@ export default function ApprovalsPage() {
                         <Td>{p.requisition.headcount}</Td>
                         <Td>{p.requisition.requester?.name}</Td>
                         <Td className="whitespace-nowrap">{fmtDate(p.requisition.submittedAt)}</Td>
-                        <Td><LinkButton variant="primary" href={`/requisitions/${p.requisition.id}`}>Approve</LinkButton></Td>
+                        <Td><LinkButton variant="primary" href={`/approvals/${p.requisition.id}`}>Approve</LinkButton></Td>
                       </tr>
                     ))}
                   </Table>
@@ -40,7 +40,7 @@ export default function ApprovalsPage() {
                   <Table head={['Requisition', 'Your step', 'Department', 'Company', 'Rank', 'How many', 'Replace', 'Requester', 'Submitted']}>
                     {d.pending.map((p: any) => (
                       <tr key={p.actionId} className="hover:bg-slate-50">
-                        <Td><Link className="font-medium text-brand-700 hover:underline" href={`/requisitions/${p.requisition.id}`}>{p.requisition.reqNo}</Link></Td>
+                        <Td><Link className="font-medium text-brand-700 hover:underline" href={`/approvals/${p.requisition.id}`}>{p.requisition.reqNo}</Link></Td>
                         <Td>{p.stepOrder}. {p.stepLabel}</Td>
                         <Td>{p.requisition.department?.name}</Td>
                         <Td>{p.requisition.company?.code}</Td>
@@ -61,7 +61,7 @@ export default function ApprovalsPage() {
                 <Table head={['Requisition', 'Your step', 'Department', 'Rank', 'How many', 'Now with', 'Submitted']}>
                   {d.upcoming.map((p: any) => (
                     <tr key={p.actionId} className="hover:bg-slate-50">
-                      <Td><Link className="font-medium text-brand-700 hover:underline" href={`/requisitions/${p.requisition.id}`}>{p.requisition.reqNo}</Link></Td>
+                      <Td><Link className="font-medium text-brand-700 hover:underline" href={`/approvals/${p.requisition.id}`}>{p.requisition.reqNo}</Link></Td>
                       <Td>{p.stepOrder}. {p.stepLabel}</Td>
                       <Td>{p.requisition.department?.name}</Td>
                       <Td>{p.requisition.rank}</Td>

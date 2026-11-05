@@ -26,6 +26,11 @@ function cookieSecure(req: Request) {
   return req.secure || String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https';
 }
 
+/** The browser's address: the web app's /api proxy puts it first in X-Forwarded-For; otherwise the socket's. */
+function clientAddress(req: Request) {
+  return String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.ip || '';
+}
+
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService, @InjectRepository(User) private readonly users: Repository<User>) {}
@@ -34,7 +39,7 @@ export class AuthController {
   @Post('login')
   @HttpCode(200)
   async login(@Body() dto: LoginDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const { token, user } = await this.auth.login(dto.email, dto.password);
+    const { token, user } = await this.auth.login(dto.email, dto.password, clientAddress(req));
     res.cookie(AUTH_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: cookieSecure(req), path: '/' });
     return { user: publicUser(user), permissions: [...effectivePermissions(user)] };
   }

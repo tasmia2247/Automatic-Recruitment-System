@@ -136,8 +136,8 @@ export default function ApplicationPage() {
                   <Card title={<>Latest screening · {runBasis(run)} · {fmtDateTime(run.createdAt)}</>} actions={<Badge>{run.overallResult}</Badge>} pad={false}>
                     <Table head={['Criterion', 'Type', 'Expected', 'Found in CV', 'Outcome', 'Reason']}>
                       {run.results.map((c: any) => (
-                        <tr key={c.criterionId}><Td>{c.label}</Td><Td>{c.mandatory ? 'Mandatory' : 'Preferred'}</Td><Td className="text-xs">{c.operator === 'mentions' ? 'written in CV:' : c.operator} {c.expected}</Td>
-                          <Td className="text-xs">{show(c.actual, 'missing')}</Td><Td><Badge tone={c.outcome === 'Pass' ? 'green' : c.outcome === 'Fail' ? 'red' : 'amber'}>{c.outcome}</Badge></Td><Td className="text-xs">{c.reason}</Td></tr>
+                        <tr key={c.criterionId}><Td>{c.label}</Td><Td>{c.mandatory ? 'Mandatory' : 'Preferred'}</Td><Td className="text-xs">{c.operator === 'mentions' ? 'written in CV:' : c.operator === 'education' ? 'degree and subject:' : c.operator === 'min_years' ? 'at least (years):' : c.operator} {c.expected}</Td>
+                          <Td className="text-xs">{show(c.actual, 'missing')}</Td><Td><Badge tone={c.outcome === 'Pass' ? 'green' : c.outcome === 'Fail' ? 'red' : 'amber'}>{c.outcome === 'Missing' ? 'Review' : c.outcome}</Badge></Td><Td className="text-xs">{c.reason}</Td></tr>
                       ))}
                     </Table>
                   </Card>

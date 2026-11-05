@@ -258,7 +258,13 @@ describe('Vacancy, job post, CV intake and screening', () => {
     await hr.post(`/api/job-posts/${ids.jobPost}/status`).send({ status: 'Published' }).expect(200);
     await hr.post(`/api/job-posts/${ids.jobPost}/criteria`).send({ criteria: [] }).expect(404); // criteria are no longer set per job post
     const reqNo = (await hr.get(`/api/requisitions/${ids.req}`).expect(200)).body.reqNo;
-    expect((await hr.get(`/api/job-posts/${ids.jobPost}`).expect(200)).body.screening).toEqual({ source: 'REQUISITION', reqNo, specialization: 'Computer Science, TypeScript', items: ['Computer Science', 'TypeScript'] });
+    // The job post starts from the requisition's Min Edu. Qualification and Experience; the screening fields stay off it.
+    const post = (await hr.get(`/api/job-posts/${ids.jobPost}`).expect(200)).body;
+    expect(post).toMatchObject({ education: 'B.Sc in CSE', experienceRequirement: '2 years', duties: 'Build and maintain ARS modules.', skills: null });
+    expect(post.prefill).toEqual({ education: 'B.Sc in CSE', experienceRequirement: '2 years', duties: 'Build and maintain ARS modules.' });
+    expect(post.screening).toBeUndefined();
+    expect(JSON.stringify(post)).not.toContain('TypeScript');
+    expect((await hr.get(`/api/vacancies/${ids.vacancy}`).expect(200)).body.screening).toMatchObject({ source: 'REQUISITION', reqNo, other: 'Computer Science, TypeScript' });
     expect((await hr.get(`/api/vacancies/${ids.vacancy}`).expect(200)).body.screening.items).toEqual(['Computer Science', 'TypeScript']);
   });
 
@@ -413,6 +419,35 @@ describe('Selection, evaluation, communication and joining', () => {
     expect((await ds.query(`SELECT count(*)::int AS n FROM evaluation_marks`))[0].n).toBe(2);
   });
 
+  it('written & interview marks come from one pre-filled sheet: one preview per exam, blank cells left out', async () => {
+    const hr = await as('recruiter');
+    const tpl = await hr.get(`/api/vacancies/${ids.vacancy}/marks-template?stageType=MAIN`).buffer(true).parse((res, cb) => { const c: Buffer[] = []; res.on('data', (d: Buffer) => c.push(d)); res.on('end', () => cb(null, Buffer.concat(c))); }).expect(200);
+    expect(tpl.headers['content-disposition']).toMatch(/_ICT_Software-Developer_written_interview_marks\.xlsx/);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(tpl.body);
+    const sheet = wb.worksheets[0];
+    expect(sheet.getRow(1).values).toEqual([undefined, 'Application ID', 'Candidate ID', 'Candidate Name', 'Written Marks', 'Interview Marks', 'Remarks']);
+    const b = (await hr.get(`/api/applications/${ids.appB}`)).body;
+    const c = (await hr.get(`/api/applications/${ids.appC}`)).body;
+    const listed = (sheet.getColumn(1).values as any[]).slice(2);
+    expect(listed).toEqual(expect.arrayContaining([b.applicationNo, c.applicationNo])); // the shortlisted candidates are already listed
+    const out = new ExcelJS.Workbook();
+    const ws = out.addWorksheet('Marks');
+    ws.addRow(['Application ID', 'Candidate ID', 'Candidate Name', 'Written Marks', 'Interview Marks', 'Remarks']);
+    ws.addRow([b.applicationNo, b.candidate.candidateNo, 'Karim', 64, 70]);
+    ws.addRow([c.applicationNo, c.candidate.candidateNo, 'Sadia', null, 66]); // written not entered yet
+    ws.addRow(['APP-1999-999999', null, 'Ghost', 40, 120]);
+    const file = Buffer.from(await out.xlsx.writeBuffer());
+    await (await as('screener')).post(`/api/vacancies/${ids.vacancy}/marks-import-main`).attach('file', file, 'main.xlsx').expect(403);
+    const prev = (await hr.post(`/api/vacancies/${ids.vacancy}/marks-import-main?writtenMaxMarks=100&interviewMaxMarks=100`).attach('file', file, 'main.xlsx').expect(201)).body;
+    expect(prev.batches.map((x: any) => [x.stageType, x.rowsAccepted, x.rowsRejected])).toEqual([['WRITTEN', 1, 1], ['INTERVIEW', 2, 1]]);
+    expect(prev.batches[1].rows[2].errors.join(' ')).toMatch(/does not belong/);
+    for (const x of prev.batches) await hr.post(`/api/imports/${x.id}/confirm`).send({}).expect(200);
+    const marks = (await hr.get(`/api/applications/${ids.appC}`)).body.marks;
+    expect(marks.map((m: any) => [m.stageType, m.marks])).toEqual([['INTERVIEW', 66]]);
+    await hr.post(`/api/vacancies/${ids.vacancy}/marks-import-main`).attach('file', await marksFile([[b.applicationNo, null, 'Karim', 5]]), 'single.xlsx').expect(400);
+  });
+
   it('AC-21: interview marks are linked to the application with evaluator and timestamp; attendance is explicit', async () => {
     const ex = await as('examiner');
     await ex.put(`/api/applications/${ids.appA}/marks`).send({ stageType: 'INTERVIEW', marks: 120, maxMarks: 100 }).expect(400);
@@ -474,6 +509,9 @@ describe('Selection, evaluation, communication and joining', () => {
     for (const st of ['WRITTEN', 'INTERVIEW']) expect(b.stages[st]).toMatchObject({ scheduledAt: '2026-11-11T03:00:00.000Z', durationMinutes: 120, location: 'Hall 2', panel: 'Head of ICT', attendance: 'Absent' });
     expect([b.stages.WRITTEN.result, b.stages.INTERVIEW.result]).toEqual(['On Hold', 'Pending']);
     expect(b.stages.OPTIONAL).toBeUndefined(); // the optional exam is only there when it is held
+    // A slot dialog saved without a date (only venue / duration) starts no round, so the status does not turn into Interview.
+    await hr.put(`/api/applications/${ids.appB}/stages/optional`).send({ location: 'Hall 9', durationMinutes: 60 }).expect(200);
+    expect((await hr.get('/api/interviews/board').expect(200)).body.rows.find((x: any) => x.applicationId === ids.appB).stages.OPTIONAL).toBeUndefined();
     await hr.put(`/api/applications/${ids.appB}/stages/viva`).send({ attendance: 'Present' }).expect(400); // Viva is now the interview board
     const audit = (await (await as('admin')).get(`/api/audit?entityType=Application&entityId=${ids.appC}&pageSize=50`).expect(200)).body.items;
     expect(audit.find((e: any) => e.action === 'stage.optional.update' && e.newValues.durationMinutes === 60)).toMatchObject({ oldValues: { panel: 'Head of ICT, HR Manager', durationMinutes: 45 }, newValues: { panel: null } });
@@ -484,6 +522,7 @@ describe('Selection, evaluation, communication and joining', () => {
     const pending = await hr.get('/api/joining/pending').expect(200);
     expect(pending.body).toHaveLength(1);
     const j = pending.body[0];
+    expect(j).toMatchObject({ headcount: 2, joinedCount: 0 }); // seats of the vacancy, shown on the Joining page
     const tpl = (await hr.get('/api/email/templates?kind=JOINING_LETTER')).body[0];
     await hr.put(`/api/joining/${j.id}`).send({ joiningDate: '2026-12-01' }).expect(200);
     await hr.post('/api/email/send').send({ applicationIds: [ids.appA], kind: 'JOINING_LETTER', templateId: tpl.id, subject: tpl.subject, body: tpl.body, variables: { reportingTime: '9:00 AM', contactPerson: 'HR desk' }, clientKey: 'k-join-0001', confirmed: true }).expect(200);
@@ -607,7 +646,7 @@ describe('Candidate CV Bank (department -> vacancy -> candidates) and applicatio
     const v2 = (await hr.put(`/api/vacancies/${ids.vacancy2}`).send({ specialization: ' MBA ' }).expect(200)).body;
     expect(v2).toMatchObject({ specialization: 'MBA', specializationVersion: 1 });
     expect((await hr.put(`/api/vacancies/${ids.vacancy2}`).send({ specialization: 'MBA' }).expect(200)).body.specializationVersion).toBe(1); // unchanged wording
-    expect((await hr.get(`/api/vacancies/${ids.vacancy2}`).expect(200)).body.screening).toEqual({ source: 'VACANCY', reqNo: null, specialization: 'MBA', items: ['MBA'] });
+    expect((await hr.get(`/api/vacancies/${ids.vacancy2}`).expect(200)).body.screening).toEqual({ source: 'VACANCY', reqNo: null, education: null, skills: null, experienceYears: null, other: 'MBA', items: ['MBA'] });
     await hr.post(`/api/vacancies/${ids.vacancy2}/rescreen`).expect(200);
     await jobs.drain();
     const screened = (await hr.get(`/api/applications/${ids.appA2}`)).body;
@@ -675,6 +714,13 @@ describe('Candidate CV Bank (department -> vacancy -> candidates) and applicatio
     await hr.post(`/api/joining/${j.id}/approve`).send({ joiningDate: '2026-12-20' }).expect(409); // rejected, not joined
 
     await hr.post(`/api/joining/${j.id}/reopen`).send({ remarks: 'Candidate changed mind' }).expect(200);
+    // No joining beyond the approved headcount: with one seat, already taken, the approval is refused and nothing changes.
+    const [{ headcount }] = await ds.query(`SELECT headcount FROM vacancies WHERE id = $1`, [ids.vacancy]);
+    await ds.query(`UPDATE vacancies SET headcount = 1 WHERE id = $1`, [ids.vacancy]);
+    const full = await hr.post(`/api/joining/${j.id}/approve`).send({ joiningDate: '2026-12-20' }).expect(409);
+    expect(full.body.message).toMatch(/All 1 seat of VAC-.* already filled \(1 joined\)/);
+    expect((await hr.get('/api/joining/pending').expect(200)).body.find((x: any) => x.applicationId === ids.appC)).toMatchObject({ status: 'Pending', headcount: 1, joinedCount: 1 });
+    await ds.query(`UPDATE vacancies SET headcount = $2 WHERE id = $1`, [ids.vacancy, headcount]);
     expect((await hr.get('/api/joining/pending').expect(200)).body.map((x: any) => x.applicationId)).toContain(ids.appC);
     await hr.post(`/api/joining/${j.id}/reject`).send({ remarks: 'Declined again' }).expect(200);
     const audit = (await (await as('admin')).get(`/api/audit?entityType=Application&entityId=${ids.appC}&pageSize=100`).expect(200)).body.items.map((e: any) => e.action);
@@ -1102,7 +1148,8 @@ describe('Hiring circular: generated PDF and plain text', () => {
     expect(txt.text).toContain('Location: Head Office, Uttara, Dhaka');
     expect(txt.text).toContain('Salary: Negotiable');
     expect(txt.text).toContain('Send your CV to: career@ananta.com.bd');
-    expect(txt.text).toContain(`Email subject: Application for Software Developer (${jp.jobNo})`); // job ID routes emailed CVs
+    expect(txt.text).toContain('Email subject: Application for Software Developer\n'); // as typed on the post, no job ID added
+    expect(txt.text).not.toContain(`(${jp.jobNo})`);
     expect(txt.text).not.toContain('[DRAFT');
 
     await mgr.get(`/api/job-posts/${ids.jobPost}/circular-file?format=docx`).expect(400);
@@ -1120,6 +1167,24 @@ describe('Direct HR vacancy: coordinator chosen at creation', () => {
     expect(v).toMatchObject({ source: 'DIRECT_HR', coordinatorId: ids.recruiter2, specialization: null, specializationVersion: 0 });
     const withSpec = (await mgr.post('/api/vacancies/direct').send({ ...body(), specialization: 'CCNA, Networking' }).expect(201)).body;
     expect(withSpec).toMatchObject({ specialization: 'CCNA, Networking', specializationVersion: 1 });
+    // "Specialization required" as separate fields: education, skills, minimum years and other requirements.
+    const structured = (await mgr.post('/api/vacancies/direct').send({ ...body(), requiredEducation: ' BSc in CSE\nDiploma in Computer ', requiredSkills: 'CCNA, MikroTik', requiredExperienceYears: 3 }).expect(201)).body;
+    expect(structured).toMatchObject({ requiredEducation: 'BSc in CSE\nDiploma in Computer', requiredSkills: 'CCNA, MikroTik', requiredExperienceYears: 3, specialization: null, specializationVersion: 1 });
+    expect((await mgr.get(`/api/vacancies/${structured.id}`).expect(200)).body.screening).toEqual({
+      source: 'VACANCY', reqNo: null, education: 'BSc in CSE\nDiploma in Computer', skills: 'CCNA, MikroTik', experienceYears: 3, other: null,
+      items: ['Education: BSc in CSE or Diploma in Computer', 'Experience: at least 3 years', 'Skill: CCNA', 'Skill: MikroTik'],
+    });
+    await mgr.post('/api/vacancies/direct').send({ ...body(), requiredExperienceYears: 'many' }).expect(400);
+    expect((await mgr.put(`/api/vacancies/${structured.id}`).send({ requiredExperienceYears: 2 }).expect(200)).body).toMatchObject({ requiredExperienceYears: 2, specializationVersion: 2 });
+    expect((await mgr.put(`/api/vacancies/${structured.id}`).send({ requiredExperienceYears: 2 }).expect(200)).body.specializationVersion).toBe(2); // unchanged
+    // A job post of a Direct HR vacancy takes its Skills, one per line; its screening education and experience stay off the post.
+    const post = (await mgr.post(`/api/vacancies/${structured.id}/job-posts`).send({ title: 'Network Engineer' }).expect(201)).body;
+    expect(post).toMatchObject({ skills: 'CCNA' + String.fromCharCode(10) + 'MikroTik', education: null, experienceRequirement: null, duties: null });
+    // A field the post leaves empty still prints from the vacancy, in the PDF and in the text version.
+    await mgr.put(`/api/job-posts/${post.id}`).send({ title: 'Network Engineer', skills: '', experienceRequirement: '3' }).expect(200);
+    const txt = (await mgr.get(`/api/job-posts/${post.id}/circular-file?format=txt`).expect(200)).text;
+    expect(txt).toContain('MikroTik');
+    expect(txt).toContain('3 years');
     await (await as('recruiter2')).get(`/api/vacancies/${v.id}`).expect(200);
     await (await as('recruiter')).get(`/api/vacancies/${v.id}`).expect(403);
     expect((await mgr.get('/api/vacancies').expect(200)).body.items.find((x: any) => x.id === v.id).coordinator).toMatchObject({ name: 'HR Coordinator Two' });
@@ -1169,7 +1234,8 @@ describe('Mail folder scan and CV data Excel', () => {
 
   it('the circular tells applicants to put the position and department in the subject', async () => {
     const txt = await (await as('hr.manager')).get(`/api/job-posts/${jobPostId}/circular-file?format=txt`).expect(200);
-    expect(txt.text).toContain('Application for Network Engineer - ICT (JOB-');
+    expect(txt.text).toContain('Email subject: Application for Network Engineer - ICT\n'); // designation and department, no job ID
+    expect((await (await as('hr.manager')).get(`/api/job-posts/${jobPostId}`).expect(200)).body.cvCollection).toBe('Email CV with subject "Application for Network Engineer - ICT"');
   });
 
   it('routes mails by subject, keeps the rest for HR and never stops on a bad file', async () => {
@@ -1305,5 +1371,21 @@ describe('Mail folder scan and CV data Excel', () => {
 
     await mgr.post('/api/intake/scan-files').expect(400);
     await (await as('recruiter')).post('/api/intake/scan-files').attach('files', raw, 'sara.eml').expect(403);
+  });
+});
+
+describe('Security hardening (security test, 2026-11-05)', () => {
+  it('responses carry security headers and do not name the server software', async () => {
+    const r = await request(app.getHttpServer()).get('/api/health').expect(200);
+    expect(r.headers).toMatchObject({ 'x-content-type-options': 'nosniff', 'x-frame-options': 'SAMEORIGIN', 'referrer-policy': 'same-origin' });
+    expect(r.headers['x-powered-by']).toBeUndefined();
+  });
+
+  it('repeated wrong passwords lock that email for a while; other accounts still sign in', async () => {
+    const attempt = (email: string, password = 'wrong-password') => request(app.getHttpServer()).post('/api/auth/login').set('X-Forwarded-For', '203.0.113.9').send({ email, password });
+    for (let i = 0; i < 5; i++) await attempt('nobody@ars.local').expect(401);
+    const locked = await attempt('Nobody@ars.local').expect(429); // the count is per email, whatever its case
+    expect(locked.body.message).toMatch(/Too many failed sign-in attempts/);
+    await attempt('examiner@ars.local', config.seedPassword).expect(200);
   });
 });

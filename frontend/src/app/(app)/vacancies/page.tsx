@@ -7,6 +7,7 @@ import { Alert, Badge, Button, Card, Field, Input, Loaded, Modal, PageHeader, Pa
 import { api, fmtDate, qs } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 import { CoordinatorSelect } from '@/components/vacancy/CoordinatorSelect';
+import { SpecializationFields, specPayload } from '@/components/SpecializationFields';
 
 const STATUSES = ['Open', 'Posting', 'Screening', 'On Hold', 'Filled', 'Closed'];
 
@@ -26,7 +27,7 @@ function List() {
   const listAct = useAction();
 
   const createDirect = async () => {
-    const r = await act.run(() => api('/vacancies/direct', { body: { ...direct, headcount: Number(direct.headcount), positionId: direct.positionId || undefined, coordinatorId: direct.coordinatorId || undefined } }));
+    const r = await act.run(() => api('/vacancies/direct', { body: { ...direct, ...specPayload(direct), headcount: Number(direct.headcount), positionId: direct.positionId || undefined, coordinatorId: direct.coordinatorId || undefined } }));
     if (r) router.push(`/vacancies/${r.id}`);
   };
 
@@ -90,9 +91,11 @@ function List() {
               </Field>
             )}
             <Field label="Reason for direct entry" required className="sm:col-span-2"><Textarea value={direct.directReason ?? ''} onChange={(e) => setDirect({ ...direct, directReason: e.target.value })} /></Field>
-            <Field label="Specialization required" className="sm:col-span-2" hint="CVs are screened against this. Separate items with commas, e.g. BSc in CSE, full stack developer. A CV passes when all are written in it. Empty = CVs are not screened.">
-              <Textarea value={direct.specialization ?? ''} onChange={(e) => setDirect({ ...direct, specialization: e.target.value })} />
-            </Field>
+            <div className="sm:col-span-2">
+              <div className="mb-1 text-sm font-semibold">Specialization required</div>
+              <p className="mb-3 text-xs text-muted">CVs are screened against these fields. Leave all empty and CVs are not screened.</p>
+              <SpecializationFields value={direct} onChange={(k, val) => setDirect({ ...direct, [k]: val })} errors={act.fieldErrors} />
+            </div>
           </div>
         )}
         <div className="mt-3"><Alert>{act.error}</Alert></div>

@@ -12,8 +12,8 @@ import {
   ExtractionRun, IntakeMessage, JobPost, JoiningRecord, ProcessingJob, Requisition, ScreeningRun, Vacancy,
 } from '../database/entities';
 import { JobsService } from '../processing/jobs.service';
-import { screen, specializationCriteria } from '../screening/screening.engine';
-import { CORE_FIELDS, cvToText, EXTRACTED_FIELDS, EXTRACTOR_VERSION, extractFromText } from './cv-extractor';
+import { requirementCriteria, screen } from '../screening/screening.engine';
+import { CORE_FIELDS, cvToText, EXTRACTED_FIELDS, EXTRACTOR_VERSION, extractFromText, readCv } from './cv-extractor';
 
 export interface UploadResult { fileName: string; ok: boolean; applicationNo?: string; candidateNo?: string; applicationId?: string; error?: string }
 
@@ -115,8 +115,9 @@ export class CandidatesService implements OnModuleInit {
     const run = await this.ds.getRepository(ExtractionRun).save({ applicationId, documentId: doc.id, status: 'Processing', processorVersion: EXTRACTOR_VERSION });
 
     let text: string;
+    let nameHint: string | null = null;
     try {
-      text = await cvToText(this.storage.read(doc.storageKey), doc.originalName);
+      ({ text, nameHint } = await readCv(this.storage.read(doc.storageKey), doc.originalName));
       if (!text.trim()) throw new Error('No readable text found (the file may be a scanned image). Please review manually.');
     } catch (e: any) {
       await this.ds.transaction(async (m) => {
@@ -126,7 +127,7 @@ export class CandidatesService implements OnModuleInit {
       throw e;
     }
 
-    const ex = extractFromText(text);
+    const ex = extractFromText(text, { nameHint });
     const missing = EXTRACTED_FIELDS.filter((f) => ex[f] === null);
     const partial = CORE_FIELDS.some((f) => ex[f] === null);
     await this.ds.transaction(async (m) => {
@@ -176,14 +177,15 @@ export class CandidatesService implements OnModuleInit {
   }
 
   /**
-   * Screens against the requisition's "Specialization required" (a Direct HR vacancy's own): each item must be written
+   * Screens against the requisition's "Specialization required" fields (a Direct HR vacancy's own): education level and subject,
+   * minimum years, and each skill or other requirement written
    * in the CV or in the (extracted or corrected) fields.
    */
   async processScreening(applicationId: string, runById: string | null) {
     const app = await this.ds.getRepository(Application).findOne({ where: { id: applicationId }, relations: { vacancy: { requisition: true } } });
     if (!app) throw new Error('Application no longer exists.');
     const req: Requisition | null = app.vacancy.requisition;
-    const criteria = specializationCriteria(req ? req.specialization : app.vacancy.specialization);
+    const criteria = requirementCriteria(req ?? app.vacancy);
     if (!criteria.length) {
       return { status: 'Partial' as const, note: req ? `Requisition ${req.reqNo} has no "Specialization required"; screening skipped.` : `Direct HR vacancy ${app.vacancy.vacancyNo} has no "Specialization required"; screening skipped.` };
     }

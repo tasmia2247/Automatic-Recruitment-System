@@ -32,7 +32,10 @@ export class DirectVacancyDto {
   @IsIn(['NEW', 'REPLACEMENT']) vacancyType: 'NEW' | 'REPLACEMENT';
   @IsOptional() @IsString() replacementEmployee?: string;
   @IsString() @MinLength(5, { message: 'A reason is required for a Direct HR Entry vacancy.' }) directReason: string;
-  /** What CVs are screened against: comma-separated items that must be written in the CV. */
+  /** "Specialization required": what CVs are screened against. `specialization` is "Other requirements". */
+  @IsOptional() @IsString() requiredEducation?: string | null;
+  @IsOptional() @IsString() requiredSkills?: string | null;
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 1 }, { message: 'Minimum experience must be a number of years.' }) @Min(0) @Max(60) requiredExperienceYears?: number | null;
   @IsOptional() @IsString() specialization?: string | null;
   @IsOptional() @IsString() remarks?: string;
   /** Optional HR coordinator; needs hr.assign_coordinator. Left out = Unassigned. */
@@ -42,7 +45,10 @@ export class DirectVacancyDto {
 export class VacancyUpdateDto {
   @IsOptional() @IsIn(VACANCY_STATUSES as unknown as string[]) status?: Vacancy['status'];
   @IsOptional() @IsString() remarks?: string;
-  /** Direct HR vacancies only; a requisition vacancy uses its approved requisition's. */
+  /** "Specialization required", Direct HR vacancies only; a requisition vacancy uses its approved requisition's. */
+  @IsOptional() @IsString() requiredEducation?: string | null;
+  @IsOptional() @IsString() requiredSkills?: string | null;
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 1 }, { message: 'Minimum experience must be a number of years.' }) @Min(0) @Max(60) requiredExperienceYears?: number | null;
   @IsOptional() @IsString() specialization?: string | null;
 }
 

@@ -85,7 +85,7 @@ export function CandidateTable({ vacancyId, q, status, showVacancy = false, onCh
                       </div>
                     ) : <span className="text-muted">No access</span>}
                   </Td>
-                  <Td className="whitespace-nowrap text-xs tabular-nums">{r.criteriaTotal ? <>{r.criteriaMet} / {r.criteriaTotal}<div className="text-muted">{r.screeningBasis === 'REQUISITION' || r.screeningBasis === 'VACANCY' ? 'specialization' : `criteria v${r.criteriaVersion}`}</div></> : '—'}</Td>
+                  <Td className="whitespace-nowrap text-xs tabular-nums">{r.criteriaTotal ? <>{r.criteriaMet} / {r.criteriaTotal}<div className="text-muted">{r.screeningBasis === 'REQUISITION' || r.screeningBasis === 'VACANCY' ? 'requirements' : `criteria v${r.criteriaVersion}`}</div></> : '—'}</Td>
                   <Td>{r.screeningResult ? <Badge>{r.screeningResult}</Badge> : <span className="text-xs text-muted">{r.processingStatus === 'Failed' ? 'CV processing failed' : 'Not screened'}</span>}</Td>
                   <Td>
                     <Badge>{r.status}</Badge>

@@ -1,6 +1,6 @@
 import { Type } from 'class-transformer';
 import {
-  IsArray, IsBoolean, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Length, MaxLength, Min, MinLength,
+  IsArray, IsBoolean, IsNumber, Max, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Length, MaxLength, Min, MinLength,
   ValidateNested,
 } from 'class-validator';
 import { ListQuery } from '../common/pagination';
@@ -34,6 +34,10 @@ export class RequisitionDto {
   @IsOptional() @IsBoolean() seatsAvailable?: boolean | null;
   @IsOptional() @Type(() => Number) @IsIn([30, 60], { message: 'Deadline must be 30 or 60 days.' }) deadlineDays?: number | null;
   @IsOptional() @IsIn(['Male', 'Female', 'Any']) gender?: 'Male' | 'Female' | 'Any' | null;
+  /** "Specialization required" (what CVs are screened against); `specialization` is "Other requirements". */
+  @IsOptional() @IsString() requiredEducation?: string | null;
+  @IsOptional() @IsString() requiredSkills?: string | null;
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 1 }, { message: 'Minimum experience must be a number of years.' }) @Min(0) @Max(60) requiredExperienceYears?: number | null;
   @IsOptional() @IsString() specialization?: string | null;
   @IsOptional() @IsString() jobDescription?: string | null;
   @IsOptional() @IsString() background?: string | null;

@@ -4,10 +4,10 @@ import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import { EmailComposer } from '@/components/EmailComposer';
 import { MarksImportModal } from '@/components/interviews/MarksImportModal';
-import { DECISIONS, KIND_LABEL, Kind, ROUND_LABEL, ROUNDS, Slot, dayKey, endTime, markOf, nextStep, shortDate, slotStage, slotsOf, time } from '@/components/interviews/rounds';
-import { ScheduleDialog, SlotDialog } from '@/components/interviews/SlotDialogs';
+import { DECISIONS, KIND_LABEL, Kind, ROUND_LABEL, Slot, dayKey, endTime, markOf, nextStep, shortDate, slotStage, slotsOf, time } from '@/components/interviews/rounds';
+import { DecisionDialog, ScheduleDialog, SlotDialog } from '@/components/interviews/SlotDialogs';
 import { Alert, Badge, Button, Card, Input, Loaded, PageHeader, Select, Stat, Table, Tabs, Td, cx, useAction, useLoad } from '@/components/ui';
-import { api, qs } from '@/lib/api';
+import { api } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
 const KIND_TONE: Record<Kind, string> = { MAIN: 'violet', OPTIONAL: 'orange' };
@@ -17,6 +17,9 @@ const startOfWeek = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0)
 const longDay = (k: string) => new Date(`${k}T00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
 const roundsOf = (kind: Kind) => (kind === 'MAIN' ? ['WRITTEN', 'INTERVIEW'] : ['OPTIONAL']);
 const shortRound = (r: string) => ROUND_LABEL[r].replace(' (viva)', '');
+/** Nothing left to do: joined, rejected at joining, not selected, or a filled / closed vacancy (unless still waiting to join). */
+const finished = (r: any) => ['Approved', 'Rejected'].includes(r.joining?.status) || r.finalDecision === 'Not Selected'
+  || (['Filled', 'Closed'].includes(r.vacancy.status) && r.finalDecision !== 'Selected');
 
 /** Marks of a round, e.g. "Written exam 72/100", or a dash. */
 function MarkText({ row, round }: { row: any; round: string }) {
@@ -58,7 +61,10 @@ function SlotCard({ slot, onOpen }: { slot: Slot; onOpen: () => void }) {
 export default function InterviewBoardPage() {
   const { can } = useAuth();
   const [filters, setFilters] = useState({ departmentId: '', designation: '', vacancyId: '', kind: '', q: '' });
-  const state = useLoad(() => api(`/interviews/board${qs({ departmentId: filters.departmentId, vacancyId: filters.vacancyId, q: filters.q })}`), [filters.departmentId, filters.vacancyId, filters.q]);
+  const [showFinished, setShowFinished] = useState(false);
+  // Everything in scope loads once; the filters narrow it here, so the dropdowns keep every choice and search is instant.
+  const state = useLoad(() => api('/interviews/board'));
+  const [decision, setDecision] = useState<{ row: any; decision: string } | null>(null);
   const [tab, setTab] = useState('schedule');
   const [week, setWeek] = useState(() => startOfWeek(new Date()));
   const [day, setDay] = useState(() => dayKey(new Date()));
@@ -68,9 +74,14 @@ export default function InterviewBoardPage() {
   const [upload, setUpload] = useState<string | null>(null);
   const act = useAction();
 
-  const all: any[] = state.data?.rows ?? [];
-  // Department and vacancy go to the API; designation and exam narrow what is loaded.
-  const rows = all.filter((r) => !filters.designation || r.vacancy.positionTitle === filters.designation);
+  const loaded: any[] = state.data?.rows ?? [];
+  const finishedCount = loaded.filter(finished).length;
+  const all = showFinished ? loaded : loaded.filter((r) => !finished(r));
+  const needle = filters.q.trim().toLowerCase();
+  const rows = all.filter((r) => (!filters.departmentId || r.vacancy.departmentId === filters.departmentId)
+    && (!filters.vacancyId || r.vacancy.id === filters.vacancyId)
+    && (!filters.designation || r.vacancy.positionTitle === filters.designation)
+    && (!needle || [r.name, r.candidateNo, r.applicationNo, r.phone, r.email].some((x) => x?.toLowerCase().includes(needle))));
   const slots = slotsOf(rows, filters.kind || undefined);
   const today = dayKey(new Date());
   const byDay = useMemo(() => slots.reduce<Record<string, Slot[]>>((m, s) => { (m[dayKey(s.stage.scheduledAt)] ??= []).push(s); return m; }, {}), [slots]);
@@ -81,6 +92,8 @@ export default function InterviewBoardPage() {
   const designations = [...new Set(all.filter((r) => !filters.departmentId || r.vacancy.departmentId === filters.departmentId).map((r) => r.vacancy.positionTitle as string))].sort();
   const vacancies = [...new Map(all.map((r) => [r.vacancy.id, r.vacancy])).values()];
   const uploadFor = vacancies.find((v) => v.id === filters.vacancyId);
+  // Marks can be uploaded for any vacancy with shortlisted candidates, finished ones included (late corrections).
+  const importVacancies = [...new Map(loaded.map((r) => [r.vacancy.id, r.vacancy])).values()];
 
   const notScheduled = rows.filter((r) => r.shortlisted && r.finalDecision === 'Pending' && !slotStage(r, 'MAIN')?.scheduledAt).length;
   const in7 = dayKey(addDays(new Date(), 7));
@@ -98,8 +111,6 @@ export default function InterviewBoardPage() {
 
   const setF = (k: string, v: string) => setFilters((f) => ({ ...f, [k]: v, ...(k === 'departmentId' ? { designation: '', vacancyId: '' } : {}) }));
   const toggle = (id: string) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const decide = (id: string, decision: string) => act.run(() => api(`/applications/${id}/final-decision`, { body: { decision } }),
-    decision === 'Selected' ? 'Selected: the candidate is now in Joining Pending.' : `Final decision recorded: ${decision}.`).then(state.reload);
   const goTo = (k: string) => { setDay(k); setWeek(startOfWeek(new Date(`${k}T00:00`))); };
 
   const slotCell = (r: any, kind: Kind) => {
@@ -130,8 +141,13 @@ export default function InterviewBoardPage() {
           <Select className="max-w-[14rem]" value={filters.vacancyId} placeholder="All vacancies" onChange={(e) => setF('vacancyId', e.target.value)}
             options={vacancies.filter((v) => (!filters.departmentId || v.departmentId === filters.departmentId) && (!filters.designation || v.positionTitle === filters.designation)).map((v) => ({ value: v.id, label: `${v.vacancyNo} · ${v.positionTitle}` }))} />
           <Select className="max-w-[15rem]" value={filters.kind} placeholder="All exams" onChange={(e) => setF('kind', e.target.value)} options={(['MAIN', 'OPTIONAL'] as Kind[]).map((k) => ({ value: k, label: KIND_LABEL[k] }))} />
-          <Input className="max-w-[14rem]" placeholder="Candidate name or ID…" value={filters.q} onChange={(e) => setF('q', e.target.value)} />
+          <Input className="max-w-[14rem]" placeholder="Name, ID or phone…" value={filters.q} onChange={(e) => setF('q', e.target.value)} aria-label="Search candidates" />
+          <label className="ml-auto flex items-center gap-2 text-sm text-muted">
+            <input type="checkbox" className="accent-brand-600" checked={showFinished} onChange={(e) => setShowFinished(e.target.checked)} />
+            Show finished ({finishedCount})
+          </label>
         </div>
+        {!showFinished && finishedCount > 0 && <p className="border-t border-line px-3 py-1.5 text-xs text-muted">Hidden: {finishedCount} finished candidate{finishedCount === 1 ? '' : 's'} (joined, rejected at joining, not selected, or of a filled / closed vacancy).</p>}
       </Card>
 
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
@@ -144,19 +160,19 @@ export default function InterviewBoardPage() {
       </div>
 
       {can(P.MARKS_IMPORT) && (
-        <Card className="mb-4" title="Upload marks from Excel" actions={!uploadFor && <span className="text-xs text-muted">Choose a vacancy in the filters first</span>}>
+        <Card className="mb-4" title="Marks from Excel">
           <div className="flex flex-wrap items-center gap-2">
-            {ROUNDS.map(([r, l]) => (
-              <Button key={r} variant={r === 'OPTIONAL' ? 'secondary' : 'primary'} disabled={!uploadFor} onClick={() => setUpload(r)}>Upload {l.replace(' (viva)', '').toLowerCase()} marks</Button>
-            ))}
-            <span className="text-xs text-muted">{uploadFor ? `For ${uploadFor.vacancyNo} · ${uploadFor.positionTitle}. The optional exam is uploaded only when it was held.` : 'Each exam has its own upload; rows are matched by Application ID.'}</span>
+            <Button disabled={!importVacancies.length} onClick={() => setUpload('MAIN')}>Written & interview marks</Button>
+            <Button variant="secondary" disabled={!importVacancies.length} onClick={() => setUpload('OPTIONAL')}>Optional exam marks</Button>
+            <span className="text-xs text-muted">Choose the department and designation, download the template with the candidates already listed, fill in the marks and upload it. The optional exam only when it was held.</span>
           </div>
         </Card>
       )}
 
       <Tabs active={tab} onChange={setTab} tabs={[{ key: 'schedule', label: 'Schedule (date-wise)' }, { key: 'candidates', label: 'Candidates by department & designation' }]} />
 
-      <Loaded state={state} empty={(d: any) => !d.rows.length && 'No shortlisted candidates yet. Shortlist candidates from a vacancy\'s Candidates tab; they appear here.'}>
+      <Loaded state={state} empty={(d: any) => (!d.rows.length ? 'No shortlisted candidates yet. Shortlist candidates from a vacancy\'s Candidates tab; they appear here.'
+        : !rows.length && (all.length ? 'No candidate matches these filters.' : `All ${finishedCount} candidates are finished. Tick "Show finished" to see them.`))}>
         {() => tab === 'schedule' ? (
           <div className="grid gap-4 lg:grid-cols-[1fr_18rem]">
             <div className="space-y-3">
@@ -234,7 +250,7 @@ export default function InterviewBoardPage() {
                         <Td className="min-w-[9rem]">{slotCell(r, 'OPTIONAL')}{markOf(r, 'OPTIONAL') && <div className="mt-1 text-sm"><MarkText row={r} round="OPTIONAL" /></div>}</Td>
                         <Td><Badge tone={next.tone}>{next.label}</Badge></Td>
                         <Td>
-                          <Select className="w-36" value={r.finalDecision} disabled={!can(P.FINAL_DECISION) || !!r.joining && r.joining.status !== 'Pending'} onChange={(e) => decide(r.applicationId, e.target.value)}
+                          <Select className="w-40" value={r.finalDecision} disabled={!can(P.FINAL_DECISION) || !!r.joining && r.joining.status !== 'Pending'} onChange={(e) => setDecision({ row: r, decision: e.target.value })}
                             options={DECISIONS.map((x) => ({ value: x, label: x }))} aria-label="Final decision" />
                           {r.joining && <div className="mt-1 text-[11px] text-muted">Joining: {r.joining.status}</div>}
                         </Td>
@@ -250,13 +266,12 @@ export default function InterviewBoardPage() {
       </Loaded>
 
       <SlotDialog row={open?.row ?? null} kind={open?.kind ?? 'MAIN'} onClose={() => setOpen(null)} onSaved={() => { act.setMessage('Saved.'); state.reload(); }} />
+      <DecisionDialog row={decision?.row ?? null} decision={decision?.decision ?? 'Pending'} onClose={() => setDecision(null)} onSaved={(m) => { act.setMessage(m); state.reload(); }} />
       <ScheduleDialog open={dialog === 'schedule'} count={selected.size} applicationIds={[...selected]} onClose={() => setDialog('')} onSaved={(m) => { act.setMessage(m); setSelected(new Set()); state.reload(); }} />
       {(dialog === 'invite' || dialog === 'result') && (
         <EmailComposer open kind={dialog === 'invite' ? 'INTERVIEW_INVITE' : 'RESULT'} applicationIds={[...selected]} onClose={() => setDialog('')} onSent={state.reload} />
       )}
-      {uploadFor && upload && (
-        <MarksImportModal vacancyId={uploadFor.id} vacancyLabel={`${uploadFor.vacancyNo} · ${uploadFor.positionTitle}`} stage={upload} open onClose={() => setUpload(null)} onDone={state.reload} />
-      )}
+      <MarksImportModal vacancies={importVacancies} vacancyId={uploadFor?.id} stage={upload ?? 'MAIN'} open={!!upload} onClose={() => setUpload(null)} onDone={state.reload} />
     </>
   );
 }

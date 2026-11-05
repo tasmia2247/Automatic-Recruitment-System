@@ -1,6 +1,6 @@
 import { extractFromText } from '../src/candidates/cv-extractor';
 import { matchSubject, OpenJob } from '../src/candidates/subject-match';
-import { screen, specializationCriteria, specializationItems } from '../src/screening/screening.engine';
+import { requirementCriteria, screen, specializationCriteria, specializationItems } from '../src/screening/screening.engine';
 import { computeVacancy } from '../src/common/scope';
 import { validateForSubmit } from '../src/requisitions/requisitions.service';
 import { render } from '../src/email/email.service';
@@ -204,5 +204,36 @@ describe('mail subject matching', () => {
   it('never matches an empty subject', () => {
     expect(matchSubject('', [job({})]).job).toBeNull();
     expect(matchSubject(null, [job({})]).job).toBeNull();
+  });
+});
+
+describe('screening against the "Specialization required" fields', () => {
+  const cv = { degree: 'Bachelor of Science (BSc)', specialization: 'Textile Engineering', education: 'Bachelor of Science (BSc), Textile Engineering - University of South Asia; HSC, Science - BCIC College', totalExperienceYears: 4, cvText: 'Skills: AutoCAD, MS Excel. Worked in a knit composite factory.' };
+  const run = (r: Parameters<typeof requirementCriteria>[0], input: Record<string, unknown> = cv) => screen(requirementCriteria(r), input as any);
+
+  it('builds one criterion per field, skills one by one, other requirements as before', () => {
+    expect(requirementCriteria({ requiredEducation: 'BSc in Textile Engineering\nDiploma in Textile', requiredSkills: 'AutoCAD, MS Excel', requiredExperienceYears: 3, specialization: 'Knit' }).map((c) => c.label))
+      .toEqual(['Education: BSc in Textile Engineering or Diploma in Textile', 'Experience: at least 3 years', 'Skill: AutoCAD', 'Skill: MS Excel', 'Knit']);
+    expect(requirementCriteria({})).toEqual([]);
+  });
+
+  it('passes when the degree level, the named degree and the subject are on the CV', () => {
+    expect(run({ requiredEducation: 'BSc in Textile Engineering', requiredSkills: 'AutoCAD', requiredExperienceYears: 3 }).overall).toBe('Pass');
+    expect(run({ requiredEducation: 'Graduate in any discipline' }).overall).toBe('Pass');
+    expect(run({ requiredEducation: 'Diploma in Textile' }).overall).toBe('Pass'); // a bachelor is above a diploma
+    expect(run({ requiredEducation: 'Masters in Textile Engineering\nBSc in Textile Engineering' }).overall).toBe('Pass'); // any alternative
+  });
+
+  it('a lower degree, another subject or fewer years is Review Required with the reason, never Fail', () => {
+    const masters = run({ requiredEducation: 'MBA in HRM' });
+    expect(masters.overall).toBe('Review Required');
+    expect(masters.results[0].reason).toBe('Education: needs MBA in HRM; a lower degree in CV (Bachelor of Science (BSc)) - needs manual verification.');
+    expect(run({ requiredEducation: 'BSc in Computer Science' }).results[0].reason).toMatch(/Computer Science not found in CV/);
+    expect(run({ requiredEducation: 'BBA in Marketing' }).results[0].reason).toMatch(/BBA not found in CV/); // same level, another degree
+    const years = run({ requiredExperienceYears: 5 });
+    expect(years).toMatchObject({ overall: 'Review Required', results: [{ outcome: 'Missing', reason: 'Experience: at least 5 years: CV shows 4 years - needs review.' }] });
+    expect(run({ requiredExperienceYears: 2 }, { ...cv, totalExperienceYears: null }).results[0].reason).toMatch(/not found in CV/);
+    expect(run({ requiredExperienceYears: 5 }, { ...cv, relevantExperienceYears: 6 }).overall).toBe('Pass'); // HR's relevant years count first
+    expect(run({ requiredEducation: 'BSc in Textile Engineering' }, { cvText: 'no education written' }).results[0].reason).toMatch(/no degree found in CV/);
   });
 });

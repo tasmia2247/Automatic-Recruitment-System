@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useState } from 'react';
+import { SpecializationFields, SpecializationView, specPayload } from '@/components/SpecializationFields';
 import { CandidatesTab } from '@/components/vacancy/CandidatesTab';
 import { CoordinatorSelect } from '@/components/vacancy/CoordinatorSelect';
 import { Alert, Badge, Button, Card, DL, Field, Input, Loaded, Modal, PageHeader, Select, Table, Tabs, Td, Textarea, useAction, useLoad } from '@/components/ui';
@@ -46,14 +47,14 @@ function Workspace() {
   const state = useLoad(() => api(`/vacancies/${id}`), [id]);
   const coordinators = useLoad(() => (can(P.COORDINATOR_ASSIGN) ? api('/hr-queue/coordinators') : Promise.resolve(null)), [can]);
   const [newPost, setNewPost] = useState<any | null>(null);
-  const [spec, setSpec] = useState<string | null>(null);
+  const [spec, setSpec] = useState<Record<string, any> | null>(null);
   const act = useAction();
 
   const createPost = async () => {
     const r = await act.run(() => api(`/vacancies/${id}/job-posts`, { body: { title: newPost.title, startDate: newPost.startDate || undefined, deadline: newPost.deadline || undefined } }));
     if (r) router.push(`/job-posts/${r.id}`);
   };
-  const saveSpec = () => act.run(() => api(`/vacancies/${id}`, { method: 'PUT', body: { specialization: spec } }), 'Specialization required saved. Use Re-run screening on the Candidates tab to apply it to CVs already received.').then((r) => { if (r) { setSpec(null); state.reload(); } });
+  const saveSpec = () => act.run(() => api(`/vacancies/${id}`, { method: 'PUT', body: specPayload(spec!) }), 'Specialization required saved. Use Re-run screening on the Candidates tab to apply it to CVs already received.').then((r) => { if (r) { setSpec(null); state.reload(); } });
   const setStatus = (status: string) => act.run(() => api(`/vacancies/${id}`, { method: 'PUT', body: { status } }), `Vacancy status set to ${status}.`).then(state.reload);
 
   return (
@@ -83,15 +84,14 @@ function Workspace() {
                     : v.coordinator?.name ?? <Badge tone="amber">Unassigned</Badge>],
                   ['Approved headcount', v.headcount], ['Created', fmtDate(v.createdAt)],
                   ...(v.directReason ? [['Direct entry reason', v.directReason] as [string, string]] : []),
-                  ...(v.source === 'DIRECT_HR' ? [['Specialization required', spec !== null ? (
-                    <div className="space-y-2">
-                      <Textarea rows={3} value={spec} placeholder="e.g. BSc in CSE, full stack developer" onChange={(e) => setSpec(e.target.value)} />
-                      <div className="flex gap-2"><Button size="sm" busy={act.busy} onClick={saveSpec}>Save</Button><Button size="sm" variant="ghost" onClick={() => setSpec(null)}>Cancel</Button></div>
+                  ['Specialization required', (
+                    <div key="spec">
+                      <SpecializationView empty="Not set: CVs are not screened" value={{ requiredEducation: v.screening?.education, requiredSkills: v.screening?.skills, requiredExperienceYears: v.screening?.experienceYears, specialization: v.screening?.other }} />
+                      {v.source !== 'DIRECT_HR' && <span className="mt-1 block text-xs text-muted">From requisition {v.screening?.reqNo}</span>}
+                      {v.source === 'DIRECT_HR' && can(P.VACANCY_EDIT) && <button className="mt-1 text-xs font-medium text-brand-700 hover:underline"
+                        onClick={() => setSpec({ requiredEducation: v.requiredEducation ?? '', requiredSkills: v.requiredSkills ?? '', requiredExperienceYears: v.requiredExperienceYears ?? '', specialization: v.specialization ?? '' })}>Edit</button>}
                     </div>
-                  ) : (
-                    <span>{v.specialization ? <span className="whitespace-pre-line">{v.specialization}</span> : <span className="text-amber-700">Not set: CVs are not screened</span>}
-                      {can(P.VACANCY_EDIT) && <button className="ml-2 text-xs font-medium text-brand-700 hover:underline" onClick={() => setSpec(v.specialization ?? '')}>Edit</button>}</span>
-                  )] as [string, React.ReactNode]] : []),
+                  )],
                   ['Remarks', show(v.remarks)],
                 ]} />
               </Card>
@@ -130,6 +130,11 @@ function Workspace() {
               </div>
             )}
             <div className="mt-3"><Alert>{act.error}</Alert></div>
+          </Modal>
+          <Modal open={!!spec} title="Specialization required" onClose={() => setSpec(null)}
+            footer={<><Button variant="secondary" onClick={() => setSpec(null)}>Cancel</Button><Button busy={act.busy} onClick={saveSpec}>Save</Button></>}>
+            {spec && <SpecializationFields value={spec} onChange={(k, val) => setSpec({ ...spec, [k]: val })} errors={act.fieldErrors} />}
+            <p className="mt-3 text-xs text-muted">CVs of this Direct HR vacancy are screened against these fields.</p>
           </Modal>
         </>
       )}

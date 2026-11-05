@@ -4,21 +4,29 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { useAuth, P } from '@/lib/auth';
+import { SpecializationFields, specPayload } from './SpecializationFields';
 import { Alert, Button, Card, Field, Input, Radio, Select, Textarea, useAction, useLoad } from './ui';
 
 type Form = Record<string, any>;
 
 const NUM_FIELDS = ['headcount', 'currentQuotaDept', 'currentQuotaDesig', 'revisedQuotaDept', 'revisedQuotaDesig', 'presentManpowerDept', 'presentManpowerDesig', 'vacancyDept', 'vacancyDesig', 'deadlineDays'];
-const TEXT_FIELDS = ['rank', 'replacementEmployeeName', 'replacementEmployeeId', 'terminationReference', 'minEducation', 'experience', 'salaryPresent', 'salaryProposed', 'vacancyOverrideReason', 'specialization', 'jobDescription', 'background'];
+const TEXT_FIELDS = ['rank', 'replacementEmployeeName', 'replacementEmployeeId', 'terminationReference', 'minEducation', 'experience', 'salaryPresent', 'salaryProposed', 'vacancyOverrideReason', 'jobDescription', 'background'];
 
 const toPayload = (f: Form) => {
   const out: Form = { departmentId: f.departmentId, companyId: f.companyId, positionId: f.positionId || null, replacePlan: !!f.replacePlan };
   for (const k of NUM_FIELDS) out[k] = f[k] === '' || f[k] === null || f[k] === undefined ? null : Number(f[k]);
   for (const k of TEXT_FIELDS) out[k] = f[k] === '' || f[k] === undefined ? null : f[k];
+  Object.assign(out, specPayload(f));
   out.seatsAvailable = f.seatsAvailable ?? null;
   out.gender = f.gender || null;
   if (f.requestDate) out.requestDate = f.requestDate;
   return out;
+};
+
+/** The number of years in an "Experience" text such as "2 years" or "3-5 yrs" (the lower figure); null when none. */
+const yearsIn = (s: unknown) => {
+  const m = String(s ?? '').match(/(\d+(?:\.\d+)?)/);
+  return m ? Number(m[1]) : null;
 };
 
 const calc = (q: any, p: any) => (q === '' || q === null || q === undefined || p === '' || p === null || p === undefined ? null : Number(q) - Number(p));
@@ -32,7 +40,16 @@ export function RequisitionForm({ initial }: { initial?: Form }) {
   const [attachKind, setAttachKind] = useState('TERMINATION_REQUEST');
   const [errors, setErrors] = useState<Record<string, string>>(initial?.submitErrors ?? {});
   const save = useAction();
-  const set = (k: string, v: any) => setF((p) => ({ ...p, [k]: v }));
+  const set = (k: string, v: any) => setF((p) => {
+    const next = { ...p, [k]: v };
+    // "Min Edu. Qualification" and "Experience" fill the matching "Specialization required" fields, until those are changed by hand.
+    if (k === 'minEducation' && (!p.requiredEducation || p.requiredEducation === (p.minEducation ?? ''))) next.requiredEducation = v;
+    if (k === 'experience') {
+      const was = yearsIn(p.experience);
+      if (p.requiredExperienceYears === '' || p.requiredExperienceYears === null || p.requiredExperienceYears === undefined || Number(p.requiredExperienceYears) === was) next.requiredExperienceYears = yearsIn(v) ?? '';
+    }
+    return next;
+  });
   const err = (k: string) => errors[k] ?? save.fieldErrors[k];
 
   // Prefill current quota / manpower from the quota list when the scope changes (still editable).
@@ -109,8 +126,8 @@ export function RequisitionForm({ initial }: { initial?: Form }) {
           <Field label="Attached Company" required error={err('companyId')}>
             <Select value={f.companyId ?? ''} placeholder="Select company…" options={(lookups.data?.companies ?? []).filter((c: any) => c.active).map((c: any) => ({ value: c.id, label: c.name }))} onChange={(e) => set('companyId', e.target.value)} />
           </Field>
-          <Field label="Min Edu. Qualification" error={err('minEducation')}><Input value={f.minEducation ?? ''} onChange={(e) => set('minEducation', e.target.value)} /></Field>
-          <Field label="Experience" error={err('experience')}><Input value={f.experience ?? ''} placeholder="e.g. 2 years" onChange={(e) => set('experience', e.target.value)} /></Field>
+          <Field label="Min Edu. Qualification" hint="Shown on the job post." error={err('minEducation')}><Input value={f.minEducation ?? ''} onChange={(e) => set('minEducation', e.target.value)} /></Field>
+          <Field label="Experience" hint="Shown on the job post." error={err('experience')}><Input value={f.experience ?? ''} placeholder="e.g. 2 years" onChange={(e) => set('experience', e.target.value)} /></Field>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Salary range: Present"><Input value={f.salaryPresent ?? ''} onChange={(e) => set('salaryPresent', e.target.value)} /></Field>
             <Field label="This case"><Input value={f.salaryProposed ?? ''} onChange={(e) => set('salaryProposed', e.target.value)} /></Field>
@@ -166,8 +183,12 @@ export function RequisitionForm({ initial }: { initial?: Form }) {
 
       <Card title="Position details">
         <div className="grid gap-4">
-          <Field label="Specialization required"><Textarea value={f.specialization ?? ''} onChange={(e) => set('specialization', e.target.value)} /></Field>
-          <Field label="JD of this position"><Textarea rows={5} value={f.jobDescription ?? ''} onChange={(e) => set('jobDescription', e.target.value)} /></Field>
+          <div>
+            <div className="mb-2 text-sm font-semibold">Specialization required</div>
+            <p className="mb-3 text-xs text-muted">CVs for this position are screened against these fields. A CV passes when it meets all of them; otherwise it goes to Review Required for HR to check. Education and experience are filled in from Min Edu. Qualification and Experience above; you can change them. These fields are used only for screening and do not appear on the job post.</p>
+            <SpecializationFields value={f} onChange={set} errors={{ requiredEducation: err('requiredEducation'), requiredSkills: err('requiredSkills'), requiredExperienceYears: err('requiredExperienceYears'), specialization: err('specialization') }} />
+          </div>
+          <Field label="JD of this position" hint="Roles and responsibilities of the job. Not used for screening."><Textarea rows={5} value={f.jobDescription ?? ''} onChange={(e) => set('jobDescription', e.target.value)} /></Field>
           <Field label="Background of the requirement" required error={err('background')}><Textarea rows={4} value={f.background ?? ''} onChange={(e) => set('background', e.target.value)} /></Field>
         </div>
       </Card>

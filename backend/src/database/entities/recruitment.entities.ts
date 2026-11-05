@@ -40,9 +40,15 @@ export class Vacancy extends BaseEntity {
   @Column({ type: 'varchar', length: 200, nullable: true }) replacementEmployee: string | null;
   /** Mandatory reason for a Direct HR Entry vacancy. */
   @Column({ type: 'text', nullable: true }) directReason: string | null;
-  /** Direct HR vacancies only: what CVs are screened against (requisition vacancies use the requisition's). */
+  /**
+   * Direct HR vacancies only: the "Specialization required" fields CVs are screened against (requisition vacancies use the
+   * requisition's). `specialization` holds "Other requirements".
+   */
+  @Column({ type: 'text', nullable: true }) requiredEducation: string | null;
+  @Column({ type: 'text', nullable: true }) requiredSkills: string | null;
+  @Column({ type: 'numeric', precision: 4, scale: 1, nullable: true, transformer: numeric }) requiredExperienceYears: number | null;
   @Column({ type: 'text', nullable: true }) specialization: string | null;
-  /** Goes up whenever `specialization` changes; screening runs record it. */
+  /** Goes up whenever any of the "Specialization required" fields changes; screening runs record it. */
   @Column({ type: 'int', default: 0 }) specializationVersion: number;
 
   @Index()
@@ -109,7 +115,7 @@ export const CRITERION_FIELDS = [
   'skills', 'expectedSalary', 'age', 'cvText',
 ] as const;
 export type CriterionField = (typeof CRITERION_FIELDS)[number];
-export const CRITERION_OPERATORS = ['gte', 'lte', 'eq', 'contains_any', 'contains_all', 'mentions'] as const;
+export const CRITERION_OPERATORS = ['gte', 'lte', 'eq', 'contains_any', 'contains_all', 'mentions', 'education', 'min_years'] as const;
 export type CriterionOperator = (typeof CRITERION_OPERATORS)[number];
 
 /** Immutable, versioned set of criteria for a job post (SRS 8.6 / AC-16). */

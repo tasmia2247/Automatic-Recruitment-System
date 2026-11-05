@@ -45,6 +45,16 @@ export class ImportQuery {
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) maxMarks?: number;
 }
 
+/** `MAIN` = the written exam and interview board in one sheet. */
+export class TemplateQuery {
+  @IsIn([...STAGE_TYPES, 'MAIN']) stageType: StageType | 'MAIN';
+}
+
+export class MainImportQuery {
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) writtenMaxMarks?: number;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) interviewMaxMarks?: number;
+}
+
 export class ConfirmDto {
   @IsOptional() @IsBoolean() allowOverwrite?: boolean;
 }

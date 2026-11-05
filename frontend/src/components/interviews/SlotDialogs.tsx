@@ -37,7 +37,8 @@ export function SlotDialog({ row, kind, onClose, onSaved }: { row: any | null; k
 
   const save = async () => {
     const slot: Record<string, any> = {};
-    if (canPlan) {
+    // A slot without a date and never scheduled saves no venue, panel or duration: that alone is not a slot.
+    if (canPlan && (stage || f.when)) {
       if (toLocalInput(stage?.scheduledAt) !== f.when) slot.scheduledAt = f.when ? new Date(f.when).toISOString() : null;
       if ((stage?.durationMinutes?.toString() ?? '') !== f.durationMinutes) slot.durationMinutes = Number(f.durationMinutes);
       if ((stage?.location ?? '') !== f.location) slot.location = f.location || null;
@@ -72,6 +73,8 @@ export function SlotDialog({ row, kind, onClose, onSaved }: { row: any | null; k
           <Field label="Interview panel" hint="Names, separated by commas."><Input value={f.panel} disabled={!canPlan} placeholder="e.g. Head of ICT, HR Manager" onChange={(e) => set('panel', e.target.value)} /></Field>
           <Field label={kind === 'MAIN' ? 'Attendance (written & interview)' : 'Attendance'}><Select value={f.attendance} disabled={!can(P.ATTENDANCE)} onChange={(e) => set('attendance', e.target.value)} options={['Not Recorded', 'Present', 'Absent'].map((x) => ({ value: x, label: x }))} /></Field>
         </div>
+        {!stage?.scheduledAt && !f.when && <p className="text-xs text-muted">Not scheduled yet: pick a date and time to schedule {kind === 'MAIN' ? 'the written exam & interview board' : 'the optional exam'}.</p>}
+        {toLocalInput(stage?.scheduledAt) !== f.when && pastWarning(f.when)}
         {rounds.map((round) => {
           const e = f.exams[round];
           const mk = markOf(row, round);
@@ -93,6 +96,48 @@ export function SlotDialog({ row, kind, onClose, onSaved }: { row: any | null; k
     </Modal>
   );
 }
+
+/**
+ * Confirms a final decision before it is recorded: Selected puts the candidate in Joining Pending, and moving away from
+ * Selected removes a still-pending joining record (its planned date and letter status), so a stray click must not do either.
+ */
+export function DecisionDialog({ row, decision, onClose, onSaved }: { row: any | null; decision: string; onClose: () => void; onSaved: (msg: string) => void }) {
+  const act = useAction();
+  const [f, setF] = useState({ decision, remarks: '' });
+  useEffect(() => { if (row) setF({ decision, remarks: row.finalDecisionRemarks ?? '' }); }, [row, decision]);
+  if (!row) return null;
+  const main = slotStage(row, 'MAIN');
+  const leavesJoining = row.finalDecision === 'Selected' && f.decision !== 'Selected' && row.joining?.status === 'Pending';
+  const marks = ['WRITTEN', 'INTERVIEW', 'OPTIONAL'].map((r) => [r, markOf(row, r)] as const).filter(([, m]) => m);
+  const save = async () => {
+    const r = await act.run(() => api(`/applications/${row.applicationId}/final-decision`, { body: { decision: f.decision, remarks: f.remarks.trim() || undefined } }));
+    if (r) {
+      onSaved(f.decision === 'Selected' ? `${row.name ?? row.applicationNo} selected: now in Joining Pending.` : `Final decision for ${row.name ?? row.applicationNo}: ${f.decision}.`);
+      onClose();
+    }
+  };
+  return (
+    <Modal open title={`Final decision · ${row.name ?? row.applicationNo}`} onClose={onClose}
+      footer={<><Button variant="secondary" onClick={onClose}>Cancel</Button><Button busy={act.busy} disabled={f.decision === row.finalDecision && f.remarks.trim() === (row.finalDecisionRemarks ?? '')} onClick={save}>Save decision</Button></>}>
+      <div className="space-y-3">
+        <div className="text-sm text-muted">{row.vacancy.department} · {row.vacancy.positionTitle} · {row.vacancy.vacancyNo} · {row.applicationNo}</div>
+        <div className="rounded-md border border-line bg-slate-50 p-3 text-sm">
+          <div>Written & interview day: <b>{main?.scheduledAt ? `${new Date(main.scheduledAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} · ${main.attendance}` : 'not scheduled'}</b></div>
+          <div className="mt-1">Marks: {marks.length ? marks.map(([r, m]) => `${ROUND_LABEL[r].replace(' (viva)', '')} ${m.marks}/${m.maxMarks ?? '—'}`).join(' · ') : <span className="text-muted">none entered</span>}</div>
+        </div>
+        <Field label="Decision"><Select value={f.decision} onChange={(e) => setF({ ...f, decision: e.target.value })} options={DECISIONS.map((x) => ({ value: x, label: x }))} /></Field>
+        <Field label="Remarks" hint="Optional; kept with the decision."><Textarea rows={2} value={f.remarks} onChange={(e) => setF({ ...f, remarks: e.target.value })} /></Field>
+        {f.decision === 'Selected' && row.finalDecision !== 'Selected' && <Alert tone="info">The candidate moves to Joining Pending, where HR sets the joining date and approves the actual joining.</Alert>}
+        {f.decision === 'Selected' && main?.attendance === 'Absent' && <Alert tone="warning">The candidate is recorded as Absent for the written & interview day.</Alert>}
+        {leavesJoining && <Alert tone="warning">The candidate leaves Joining Pending; the planned joining date{row.joining?.joiningDate ? ` (${row.joining.joiningDate})` : ''} and letter status recorded there are removed.</Alert>}
+        <Alert>{act.error}</Alert>
+      </div>
+    </Modal>
+  );
+}
+
+/** A slot time already past when it is being set: allowed (recording an exam held earlier), but worth a second look. */
+export const pastWarning = (local: string) => (local && new Date(local).getTime() < Date.now() ? <Alert tone="warning">This date and time is in the past. Check it, unless you are recording an exam that was already held.</Alert> : null);
 
 /** Schedules or reschedules the main day (written + interview) or the optional exam for several candidates, of any vacancy, at once. */
 export function ScheduleDialog({ open, count, applicationIds, onClose, onSaved }: { open: boolean; count: number; applicationIds: string[]; onClose: () => void; onSaved: (msg: string) => void }) {
@@ -121,6 +166,7 @@ export function ScheduleDialog({ open, count, applicationIds, onClose, onSaved }
         <Field label="Venue" className="sm:col-span-2"><Input value={f.location} placeholder="e.g. Board Room, Head Office" onChange={(e) => setF({ ...f, location: e.target.value })} /></Field>
         <Field label="Interview panel" className="sm:col-span-2"><Textarea rows={2} value={f.panel} placeholder="e.g. Head of ICT, HR Manager" onChange={(e) => setF({ ...f, panel: e.target.value })} /></Field>
       </div>
+      <div className="mt-3">{pastWarning(f.when)}</div>
       <p className="mt-3 text-xs text-muted">Shortlisted candidates sit the written exam and the interview board on the same day, so one slot covers both. All selected candidates get the same time; adjust single slots afterwards.</p>
       <div className="mt-2"><Alert>{act.error}</Alert></div>
     </Modal>

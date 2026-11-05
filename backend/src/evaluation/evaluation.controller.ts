@@ -11,7 +11,7 @@ import { P } from '../common/permissions';
 import { assertApplicationAccess, assertApplicationsAccess, assertImportAccess, assertVacancyAccess } from '../common/scope';
 import { STAGE_TYPES, StageType } from '../database/entities';
 import { EvaluationService } from './evaluation.service';
-import { ConfirmDto, DecisionDto, ImportQuery, InterviewBoardQuery, MarkDto, ScheduleDto, StageDto } from './evaluation.dto';
+import { ConfirmDto, DecisionDto, ImportQuery, InterviewBoardQuery, MainImportQuery, MarkDto, ScheduleDto, StageDto, TemplateQuery } from './evaluation.dto';
 
 @Controller()
 export class EvaluationController {
@@ -71,7 +71,7 @@ export class EvaluationController {
 
   @Get('vacancies/:id/marks-template')
   @RequirePerm(P.MARKS_IMPORT)
-  async template(@Param('id', ParseUUIDPipe) id: string, @Query() q: ImportQuery, @CurrentUser() me: AuthUser, @Res() res: Response) {
+  async template(@Param('id', ParseUUIDPipe) id: string, @Query() q: TemplateQuery, @CurrentUser() me: AuthUser, @Res() res: Response) {
     await assertVacancyAccess(this.ds, me, id);
     const { fileName, buffer } = await this.svc.template(id, q.stageType);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -85,6 +85,15 @@ export class EvaluationController {
   async preview(@Param('id', ParseUUIDPipe) id: string, @UploadedFile() file: Express.Multer.File, @Query() q: ImportQuery, @CurrentUser() me: AuthUser) {
     await assertVacancyAccess(this.ds, me, id);
     return this.svc.preview(id, file, q.stageType, q.component?.trim() || 'Total', q.maxMarks ?? null, me);
+  }
+
+  /** Written exam and interview board marks from one sheet: one preview batch per exam, each confirmed like any other. */
+  @Post('vacancies/:id/marks-import-main')
+  @RequirePerm(P.MARKS_IMPORT)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: config.maxUploadBytes } }))
+  async previewMain(@Param('id', ParseUUIDPipe) id: string, @UploadedFile() file: Express.Multer.File, @Query() q: MainImportQuery, @CurrentUser() me: AuthUser) {
+    await assertVacancyAccess(this.ds, me, id);
+    return this.svc.previewMain(id, file, { WRITTEN: q.writtenMaxMarks ?? null, INTERVIEW: q.interviewMaxMarks ?? null }, me);
   }
 
   @Get('imports/:id')

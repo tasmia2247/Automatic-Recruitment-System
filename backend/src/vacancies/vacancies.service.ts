@@ -13,14 +13,42 @@ import {
   JobPost, REQ_STATUS, Requisition, User, Vacancy,
 } from '../database/entities';
 import { DirectVacancyDto, HrQueueQuery, JobPostDto, VacancyListQuery, VacancyUpdateDto } from './vacancies.dto';
-import { buildCircular, circularPdf, circularText } from './circular';
-import { specializationItems } from '../screening/screening.engine';
+import { buildCircular, circularPdf, circularText, defaultSubject } from './circular';
+import { requirementCriteria } from '../screening/screening.engine';
 
-/** What CVs of a vacancy are screened against: the requisition's "Specialization required", or a Direct HR vacancy's own. */
-const screeningBasis = (v: Pick<Vacancy, 'specialization'>, r: Requisition | null) => {
-  const specialization = r ? r.specialization : v.specialization;
-  return { source: r ? 'REQUISITION' : 'VACANCY', reqNo: r?.reqNo ?? null, specialization: specialization ?? null, items: specializationItems(specialization) };
+const REQUIREMENT_FIELDS = ['requiredEducation', 'requiredSkills', 'requiredExperienceYears', 'specialization'] as const;
+type RequirementSource = Pick<Vacancy, (typeof REQUIREMENT_FIELDS)[number]>;
+
+/** What CVs of a vacancy are screened against: the requisition's "Specialization required" fields, or a Direct HR vacancy's own. */
+const screeningBasis = (v: RequirementSource, r: Requisition | null) => {
+  const src: RequirementSource = r ?? v;
+  return {
+    source: r ? 'REQUISITION' : 'VACANCY', reqNo: r?.reqNo ?? null,
+    education: src.requiredEducation ?? null, skills: src.requiredSkills ?? null, experienceYears: src.requiredExperienceYears ?? null, other: src.specialization ?? null,
+    items: requirementCriteria(src).map((c) => c.label),
+  };
 };
+
+/**
+ * What a job post takes from its requisition (owner, 2026-11-05): Min Edu. Qualification → education, Experience → experience,
+ * JD → key responsibilities, Skills → required skills (one per line, as the circular prints them). A Direct HR vacancy has only
+ * its own Skills. Other "Specialization required" fields (education/experience for screening, other requirements) never go on a post.
+ */
+export function jobPostPrefill(v: Pick<Vacancy, 'requiredSkills'> & { requisition?: Requisition | null }) {
+  const r = v.requisition ?? null;
+  const skillsText = r ? r.requiredSkills : v.requiredSkills;
+  const skills = (skillsText ?? '').split(/[,;\n]/).map((x) => x.trim()).filter(Boolean).join('\n') || null;
+  const out = { education: r?.minEducation?.trim() || null, experienceRequirement: r?.experience?.trim() || null, duties: r?.jobDescription?.trim() || null, skills };
+  return Object.fromEntries(Object.entries(out).filter(([, x]) => x)) as Partial<Record<keyof typeof out, string>>;
+}
+
+/** Trimmed "Specialization required" values from a request; blank text and an empty number become null. */
+function requirementValues(dto: Partial<RequirementSource>) {
+  const out: Partial<RequirementSource> = {};
+  for (const k of ['requiredEducation', 'requiredSkills', 'specialization'] as const) if (dto[k] !== undefined) out[k] = (dto[k] as string | null)?.trim() || null;
+  if (dto.requiredExperienceYears !== undefined) out.requiredExperienceYears = dto.requiredExperienceYears === null || (dto.requiredExperienceYears as any) === '' ? null : Number(dto.requiredExperienceYears);
+  return out;
+}
 
 @Injectable()
 export class VacancyService {
@@ -134,8 +162,8 @@ export class VacancyService {
     if (dto.coordinatorId && !me.permissions.has(P.COORDINATOR_ASSIGN)) throw new ForbiddenException('You do not have permission to assign a coordinator.');
     return this.ds.transaction(async (m) => {
       const coordinator = dto.coordinatorId ? await this.eligibleCoordinator(m, dto.coordinatorId) : null;
-      const specialization = dto.specialization?.trim() || null;
-      const v = m.create(Vacancy, { ...dto, specialization, specializationVersion: specialization ? 1 : 0, coordinatorId: coordinator?.id ?? null, positionId: dto.positionId ?? null, source: 'DIRECT_HR', requisitionId: null, vacancyNo: await this.ids.next(m, 'VAC'), status: 'Open', createdById: me.id });
+      const reqs = requirementValues(dto);
+      const v = m.create(Vacancy, { ...dto, ...reqs, specializationVersion: Object.values(reqs).some((x) => x !== null && x !== undefined) ? 1 : 0, coordinatorId: coordinator?.id ?? null, positionId: dto.positionId ?? null, source: 'DIRECT_HR', requisitionId: null, vacancyNo: await this.ids.next(m, 'VAC'), status: 'Open', createdById: me.id });
       await m.save(v);
       await this.audit.log(m, me, 'vacancy.create_direct', 'Vacancy', v.id, { label: v.vacancyNo, new: { ...dto } });
       if (coordinator) {
@@ -192,12 +220,12 @@ export class VacancyService {
     return this.ds.transaction(async (m) => {
       const v = await m.findOne(Vacancy, { where: { id }, lock: { mode: 'pessimistic_write' } });
       if (!v) throw new NotFoundException();
-      if (dto.specialization !== undefined) {
+      if (REQUIREMENT_FIELDS.some((k) => dto[k] !== undefined)) {
         if (v.source !== 'DIRECT_HR') throw new BadRequestException('This vacancy is screened against the Specialization required of its approved requisition, which cannot be changed here.');
-        dto.specialization = dto.specialization?.trim() || null;
-        if (dto.specialization !== v.specialization) v.specializationVersion += 1;
+        Object.assign(dto, requirementValues(dto));
+        if (REQUIREMENT_FIELDS.some((k) => dto[k] !== undefined && dto[k] !== v[k])) v.specializationVersion += 1;
       }
-      const d = diff(v, { ...v, ...dto }, ['status', 'remarks', 'specialization']);
+      const d = diff(v, { ...v, ...dto }, ['status', 'remarks', ...REQUIREMENT_FIELDS]);
       Object.assign(v, dto, { updatedById: me.id });
       await m.save(v);
       if (d.changed.length) await this.audit.log(m, me, d.changed.includes('status') ? 'vacancy.status_change' : 'vacancy.update', 'Vacancy', id, { label: v.vacancyNo, ...d });
@@ -210,14 +238,15 @@ export class VacancyService {
   async createJobPost(vacancyId: string, dto: JobPostDto, me: AuthUser) {
     await assertVacancyAccess(this.ds, me, vacancyId);
     return this.ds.transaction(async (m) => {
-      const v = await m.findOne(Vacancy, { where: { id: vacancyId } });
+      const v = await m.findOne(Vacancy, { where: { id: vacancyId }, relations: { requisition: true, department: true } });
       if (!v) throw new NotFoundException('Vacancy not found.');
       if (['Closed', 'Filled'].includes(v.status)) throw new ConflictException(`Vacancy is ${v.status}.`);
       this.checkDates(dto);
       const jobNo = await this.ids.next(m, 'JOB');
+      // The circular starts from the requisition's details (see jobPostPrefill); whatever the request sends wins.
       const jp = m.create(JobPost, {
-        ...dto, vacancyId, jobNo, status: 'Draft', createdById: me.id,
-        cvCollection: dto.cvCollection ?? `Email CV with subject containing "${jobNo}"`,
+        ...jobPostPrefill(v), ...Object.fromEntries(Object.entries(dto).filter(([, x]) => x !== undefined)), vacancyId, jobNo, status: 'Draft', createdById: me.id,
+        cvCollection: dto.cvCollection ?? `Email CV with subject "${defaultSubject(dto.title, v.department.name)}"`,
       });
       await m.save(jp);
       if (v.status === 'Open') { v.status = 'Posting'; await m.save(v); }
@@ -234,8 +263,9 @@ export class VacancyService {
     await assertJobPostAccess(this.ds, me, id);
     const jp = await this.ds.getRepository(JobPost).findOne({ where: { id }, relations: { vacancy: { department: true, company: true, requisition: true } } });
     if (!jp) throw new NotFoundException('Job post not found.');
+    // The requisition itself and its screening fields stay off the job post; `prefill` lets the form fill fields a draft left empty.
     const { requisition, ...vacancy } = jp.vacancy;
-    return { ...jp, vacancy, screening: screeningBasis(vacancy, requisition) };
+    return { ...jp, vacancy, prefill: jobPostPrefill({ ...vacancy, requisition }) };
   }
 
   async updateJobPost(id: string, dto: JobPostDto, me: AuthUser) {
@@ -296,9 +326,13 @@ export class VacancyService {
   /** The hiring circular generated from the job post's current details, as a poster PDF or plain text. */
   async generatedCircular(id: string, format: 'pdf' | 'txt', me: AuthUser) {
     await assertJobPostAccess(this.ds, me, id);
-    const jp = await this.ds.getRepository(JobPost).findOne({ where: { id }, relations: { vacancy: { department: true, company: true } } });
+    const jp = await this.ds.getRepository(JobPost).findOne({ where: { id }, relations: { vacancy: { department: true, company: true, requisition: true } } });
     if (!jp) throw new NotFoundException('Job post not found.');
-    const c = buildCircular(jp, jp.vacancy);
+    // A field the post leaves empty prints the requisition's value, so the circular is complete before HR saves the post.
+    const fill = jobPostPrefill(jp.vacancy);
+    const merged = { ...jp } as JobPost;
+    for (const [k, val] of Object.entries(fill)) if (!String((merged as any)[k] ?? '').trim()) (merged as any)[k] = val;
+    const c = buildCircular(merged, jp.vacancy);
     const base = `${jp.jobNo} ${jp.title}`.replace(/[^\w\- ]+/g, ' ').replace(/\s+/g, ' ').trim();
     return format === 'pdf'
       ? { name: `${base}.pdf`, type: 'application/pdf', buffer: await circularPdf(c) }
