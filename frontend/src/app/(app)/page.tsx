@@ -1,8 +1,9 @@
 'use client';
 
 import { Card, Empty, Loaded, PageHeader, Stat, Table, Td, useLoad } from '@/components/ui';
-import { api, fmtDateTime } from '@/lib/api';
+import { api } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
+import { RecruitmentDashboardBody } from './reports/_body';
 
 const STAGE_LABEL: Record<string, string> = { WRITTEN: 'Written exam', INTERVIEW: 'Interview board', OPTIONAL: 'Optional exam' };
 
@@ -101,22 +102,11 @@ export default function Dashboard() {
               </Section>
             )}
 
-            {can(P.MONITOR_VIEW) && (d.failedJobs > 0 || d.failedEmails > 0) && (
-              <Card title="Processing issues">
-                <div className="grid grid-cols-2 gap-3">
-                  <Stat label="Failed background jobs" value={d.failedJobs} tone="red" hint="A CV that could not be read shows its error in the vacancy's candidate list" />
-                  <Stat label="Failed emails" value={d.failedEmails} tone="red" hint="Retry from the vacancy's Emails tab" />
-                </div>
-              </Card>
+            {can(P.RECRUITMENT_ALL) && (
+              <Section title="Recruitment Dashboard" subtitle="Funnel, conversion and top vacancies, across every vacancy you can see.">
+                <RecruitmentDashboardBody />
+              </Section>
             )}
-
-            <Card title="My recent activity">
-              {d.recentActivity.length ? (
-                <Table head={['When', 'Action', 'Record']}>
-                  {d.recentActivity.map((e: any) => <tr key={e.id}><Td className="whitespace-nowrap text-muted">{fmtDateTime(e.createdAt)}</Td><Td>{e.action}</Td><Td>{e.entityLabel ?? e.entityType}</Td></tr>)}
-                </Table>
-              ) : <Empty>No activity yet.</Empty>}
-            </Card>
           </div>
         )}
       </Loaded>

@@ -86,7 +86,15 @@ export class RequisitionService {
     const { skip, take } = skipTake(q);
     const [items, total] = await qb.skip(skip).take(take).getManyAndCount();
     const pending = await this.currentApprovers(items.map((i) => i.id));
-    return paged(items.map((r) => ({ ...this.view(r), currentApprover: pending[r.id] ?? null })), total, q);
+    // For the Super Admin's Delete dialog: what else goes with the requisition.
+    const made: Record<string, { vacancyNo: string; applications: number }> = {};
+    if (me.permissions.has(P.REQ_MANAGE_ALL) && items.length) {
+      const rows = await this.ds.query(
+        `SELECT v."requisitionId" AS id, v."vacancyNo", (SELECT count(*)::int FROM applications a WHERE a."vacancyId" = v.id) AS applications
+         FROM vacancies v WHERE v."requisitionId" = ANY($1::uuid[])`, [items.map((i) => i.id)]);
+      for (const x of rows) made[x.id] = { vacancyNo: x.vacancyNo, applications: x.applications };
+    }
+    return paged(items.map((r) => ({ ...this.view(r), currentApprover: pending[r.id] ?? null, vacancy: made[r.id] ?? null })), total, q);
   }
 
   private async currentApprovers(ids: string[]) {
@@ -107,7 +115,6 @@ export class RequisitionService {
     const approvals = await this.ds.getRepository(ApprovalAction).find({
       where: { requisitionId: id }, relations: { approver: true, actedBy: true }, order: { version: 'DESC', stepOrder: 'ASC' },
     });
-    const vacancy = await this.ds.query(`SELECT id, "vacancyNo", status FROM vacancies WHERE "requisitionId" = $1`, [id]);
     const current = r.status === REQ_STATUS.PENDING
       ? approvals.find((a) => a.status === APPROVAL_STATUS.PENDING && a.version === r.version) : undefined;
     const canAct = !!current && (current.approverUserId === me.id || me.permissions.has(P.ACT_ON_BEHALF));
@@ -121,7 +128,7 @@ export class RequisitionService {
         actedBy: a.actedBy ? { id: a.actedBy.id, name: a.actedBy.name } : null,
         documents: docs(a.id).map((x) => ({ id: x.id, originalName: x.originalName })),
       })),
-      vacancy: vacancy[0] ?? null,
+      // The vacancy made from it is no longer shown on the requisition or the HR Approved Queue (owner, 2026-11-08); it is opened from Vacancies.
       canEdit: EDITABLE_STATUSES.includes(r.status) && this.actsAsRequester(r, me) && me.permissions.has(P.REQ_EDIT),
       canAct,
       currentAction: canAct
@@ -167,7 +174,7 @@ export class RequisitionService {
    * Approver inbox (AC-03): tasks currently assigned to me, my later steps on requisitions still in approval
    * (view only until it is my turn) and, for final approvers (Admin, Super Admin), every requisition pending approval.
    */
-  async inbox(me: AuthUser) {
+  async inbox(me: AuthUser, decisionOrder: 'ASC' | 'DESC' = 'DESC') {
     const open = (status: string) => this.ds.getRepository(ApprovalAction).createQueryBuilder('a')
       .innerJoinAndSelect('a.requisition', 'r').innerJoinAndSelect('a.approver', 'ap')
       .leftJoinAndSelect('r.department', 'd').leftJoinAndSelect('r.company', 'c').leftJoinAndSelect('r.requester', 'u')
@@ -185,7 +192,7 @@ export class RequisitionService {
     const decided = await this.ds.getRepository(ApprovalAction).createQueryBuilder('a')
       .innerJoinAndSelect('a.requisition', 'r').leftJoinAndSelect('r.department', 'd')
       .where('(a.approverUserId = :me OR a.actedById = :me) AND a.decidedAt IS NOT NULL AND a.carriedOver = false', { me: me.id })
-      .orderBy('a.decidedAt', 'DESC').take(50).getMany();
+      .orderBy('a.decidedAt', decisionOrder).take(50).getMany();
     return {
       pending: acts.map((a) => ({ actionId: a.id, stepLabel: a.stepLabel, stepOrder: a.stepOrder, requisition: this.view(a.requisition) })),
       upcoming: upcoming.map((a) => ({
@@ -270,7 +277,7 @@ export class RequisitionService {
 
       const route = await this.findRoute(m, r.departmentId);
       const steps = route.steps.sort((a, b) => a.stepOrder - b.stepOrder).filter((s) => s.required);
-      if (!steps.length) throw new BadRequestException('The approval route has no required steps. Ask the Super Admin to configure it.');
+      if (!steps.length) throw new BadRequestException('The approval route has no required steps. Ask the system administrator to configure it.');
 
       const isResubmit = r.status === REQ_STATUS.RETURNED;
       const prevVersion = r.version;
@@ -325,7 +332,7 @@ export class RequisitionService {
     const route =
       (await m.findOne(ApprovalRoute, { where: { departmentId, active: true }, relations: { steps: true } })) ??
       (await m.findOne(ApprovalRoute, { where: { departmentId: IsNull(), active: true }, relations: { steps: true } }));
-    if (!route) throw new BadRequestException('No active approval route is configured. Ask the Super Admin to set one up.');
+    if (!route) throw new BadRequestException('No active approval route is configured. Ask the system administrator to set one up.');
     return route;
   }
 
@@ -551,5 +558,75 @@ export class RequisitionService {
     const att = await this.ds.getRepository(RequisitionAttachment).findOne({ where: { id: attId, requisitionId: id } });
     if (!att) throw new NotFoundException();
     return { att, buffer: this.storage.read(att.storageKey) };
+  }
+
+  /**
+   * Super Admin delete (owner, 2026-11-08: "Delete everything"). Removes the requisition with its approval history and attachments
+   * and, when a vacancy was made from it, that vacancy with everything under it: job posts and criteria, applications, CV
+   * documents and text, extraction and screening runs, remarks, stages, marks, imports, emails and batches, the vacancy's own
+   * email templates, joining records, intake mails filed to it, background jobs and notifications that point at them.
+   * Candidates left with no other application are deleted too; a candidate who also applied elsewhere is kept. Stored files
+   * are erased after the commit. The Audit Log keeps its past entries and gets one `requisition.delete` entry with the counts.
+   */
+  async remove(id: string, me: AuthUser, reason: string) {
+    const files: string[] = [];
+    const result = await this.ds.transaction(async (m) => {
+      const r = await m.findOne(Requisition, { where: { id }, relations: { department: true } });
+      if (!r) throw new NotFoundException();
+      const q = async (sql: string, params: unknown[]) => m.query(sql, params) as Promise<any[]>;
+      const ids = async (sql: string, params: unknown[]) => (await q(sql, params)).map((x) => x.id as string);
+      const del = async (sql: string, params: unknown[]) => Number((await m.query(sql, params))[1] ?? 0);
+      const counts: Record<string, number> = {};
+      const [vacancy] = await q(`SELECT id, "vacancyNo" FROM vacancies WHERE "requisitionId" = $1`, [id]);
+      if (vacancy) {
+        const v = [vacancy.id];
+        const apps = await ids(`SELECT id FROM applications WHERE "vacancyId" = $1`, v);
+        const cands = (await q(`SELECT DISTINCT "candidateId" AS id FROM applications WHERE "vacancyId" = $1`, v)).map((x) => x.id as string);
+        const posts = await ids(`SELECT id FROM job_posts WHERE "vacancyId" = $1`, v);
+        const events = await ids(`SELECT id FROM email_events WHERE "applicationId" = ANY($1::uuid[])`, [apps]);
+        const intake = await q(`SELECT id, attachments FROM intake_messages WHERE "vacancyId" = $1`, v);
+        files.push(...(await q(`SELECT "storageKey" FROM candidate_documents WHERE "applicationId" = ANY($1::uuid[]) AND "storageKey" IS NOT NULL`, [apps])).map((x) => x.storageKey));
+        files.push(...(await q(`SELECT "circularAttachmentKey" AS k FROM job_posts WHERE "vacancyId" = $1 AND "circularAttachmentKey" IS NOT NULL`, v)).map((x) => x.k));
+        for (const msg of intake) for (const a of msg.attachments ?? []) if (a.storageKey) files.push(a.storageKey);
+
+        const refs = [...apps, ...events, ...intake.map((x: any) => x.id), vacancy.id];
+        await del(`DELETE FROM processing_jobs WHERE "refId" = ANY($1::uuid[])`, [refs]);
+        await del(`DELETE FROM notifications WHERE link LIKE $1 OR link = ANY($2::text[])`, [`/vacancies/${vacancy.id}%`, apps.map((a) => `/applications/${a}`)]);
+        const batches = (await q(`SELECT DISTINCT "batchId" AS id FROM email_events WHERE id = ANY($1::uuid[])`, [events])).map((x) => x.id as string);
+        counts.emails = await del(`DELETE FROM email_events WHERE id = ANY($1::uuid[])`, [events]);
+        // The vacancy's batches, and any other batch these emails were the last ones of.
+        await del(`DELETE FROM email_batches b WHERE (b."vacancyId" = $1 OR b.id = ANY($2::uuid[])) AND NOT EXISTS (SELECT 1 FROM email_events e WHERE e."batchId" = b.id)`, [vacancy.id, batches]);
+        const templates = await ids(`SELECT id FROM email_templates WHERE "vacancyId" = $1`, v);
+        await del(`DELETE FROM email_template_versions WHERE "templateId" = ANY($1::uuid[])`, [templates]);
+        await del(`DELETE FROM email_templates WHERE id = ANY($1::uuid[])`, [templates]);
+        await del(`DELETE FROM import_batches WHERE "vacancyId" = $1`, v); // rows cascade
+        counts.intakeMails = await del(`DELETE FROM intake_messages WHERE "vacancyId" = $1`, v);
+        counts.joining = await del(`DELETE FROM joining_records WHERE "applicationId" = ANY($1::uuid[])`, [apps]);
+        counts.marks = await del(`DELETE FROM evaluation_marks WHERE "applicationId" = ANY($1::uuid[])`, [apps]);
+        for (const t of ['candidate_stages', 'candidate_remarks', 'screening_runs', 'extraction_runs', 'candidate_documents']) {
+          await del(`DELETE FROM ${t} WHERE "applicationId" = ANY($1::uuid[])`, [apps]);
+        }
+        counts.applications = await del(`DELETE FROM applications WHERE id = ANY($1::uuid[])`, [apps]);
+        const orphans = await ids(`SELECT c.id FROM candidates c WHERE c.id = ANY($1::uuid[]) AND NOT EXISTS (SELECT 1 FROM applications a WHERE a."candidateId" = c.id)`, [cands]);
+        await m.query(`UPDATE applications SET "suspectedDuplicateCandidateId" = NULL, "duplicateReview" = CASE WHEN "duplicateReview" = 'PENDING' THEN 'NONE' ELSE "duplicateReview" END WHERE "suspectedDuplicateCandidateId" = ANY($1::uuid[])`, [orphans]);
+        counts.candidates = await del(`DELETE FROM candidates WHERE id = ANY($1::uuid[])`, [orphans]);
+        await del(`DELETE FROM screening_criteria_sets WHERE "jobPostId" = ANY($1::uuid[])`, [posts]); // criteria cascade
+        counts.jobPosts = await del(`DELETE FROM job_posts WHERE id = ANY($1::uuid[])`, [posts]);
+        await del(`DELETE FROM vacancies WHERE id = $1`, v);
+      }
+      files.push(...(await q(`SELECT "storageKey" FROM requisition_attachments WHERE "requisitionId" = $1`, [id])).map((x) => x.storageKey));
+      counts.approvals = Number((await q(`SELECT count(*)::int AS n FROM approval_actions WHERE "requisitionId" = $1`, [id]))[0].n);
+      await del(`DELETE FROM notifications WHERE link LIKE $1 OR link LIKE $2`, [`/requisitions/${id}%`, `/approvals/${id}%`]);
+      await del(`DELETE FROM requisitions WHERE id = $1`, [id]); // approval actions and attachments cascade
+      const label = r.reqNo ?? 'Draft requisition';
+      await this.audit.log(m, me, 'requisition.delete', 'Requisition', id, {
+        label,
+        old: { reqNo: r.reqNo, status: r.status, department: r.department?.name, rank: r.rank, headcount: r.headcount, vacancyNo: vacancy?.vacancyNo ?? null },
+        new: { reason, deleted: counts },
+      });
+      return { deleted: true, reqNo: r.reqNo, vacancyNo: vacancy?.vacancyNo ?? null, counts };
+    });
+    for (const key of files) this.storage.remove(key);
+    return result;
   }
 }

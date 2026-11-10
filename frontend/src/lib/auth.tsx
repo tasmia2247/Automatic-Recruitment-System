@@ -77,11 +77,12 @@ export const P = {
   HR_QUEUE: 'hr.queue', COORDINATOR_ASSIGN: 'hr.assign_coordinator', RECRUITMENT_ALL: 'recruitment.view_all', VACANCY_VIEW: 'vacancy.view', VACANCY_CREATE: 'vacancy.create', VACANCY_DIRECT: 'vacancy.create_direct',
   VACANCY_EDIT: 'vacancy.edit', JOBPOST_EDIT: 'jobpost.edit',
   CANDIDATE_VIEW: 'candidate.view', CANDIDATE_EDIT: 'candidate.edit', CV_UPLOAD: 'cv.upload', CV_DOWNLOAD: 'cv.download',
-  CANDIDATE_MERGE: 'candidate.duplicate_review', SCREENING_RUN: 'screening.run', EXPORT: 'report.export',
+  CANDIDATE_MERGE: 'candidate.duplicate_review', CANDIDATE_DELETE: 'candidate.delete', SCREENING_RUN: 'screening.run', EXPORT: 'report.export',
   SHORTLIST: 'selection.shortlist', SHORTLIST_OVERRIDE: 'selection.override',
   ATTENDANCE: 'evaluation.attendance', MARKS_ENTER: 'evaluation.marks', MARKS_IMPORT: 'evaluation.import', MARKS_OVERWRITE: 'evaluation.overwrite',
   FINAL_DECISION: 'selection.final_decision', EMAIL_SEND: 'email.send', TEMPLATE_MANAGE: 'email.manage_template',
   JOINING_VIEW: 'joining.view', JOINED_VIEW: 'joining.view_joined', JOINING_APPROVE: 'joining.approve',
   USER_MANAGE: 'admin.users', AUDIT_VIEW: 'audit.view', MONITOR_VIEW: 'monitor.view', MONITOR_RETRY: 'monitor.retry', DASHBOARD_HR: 'dashboard.hr',
   DASHBOARD_DEPT: 'dashboard.department', DASHBOARD_ADMIN: 'dashboard.admin',
+  REPORTS_VIEW: 'report.view',
 } as const;

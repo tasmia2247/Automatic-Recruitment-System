@@ -13,8 +13,10 @@ export type ImportVacancy = { id: string; vacancyNo: string; positionTitle: stri
  * `MAIN` (owner, 2026-11-05) is one sheet with Written Marks and Interview Marks, giving one preview per exam, saved together;
  * `OPTIONAL` (or any single exam) has one Marks column. The vacancy is picked here by department and designation.
  */
-export function MarksImportModal({ vacancies, vacancyId: initial, stage, open, onClose, onDone }: {
+export function MarksImportModal({ vacancies, vacancyId: initial, stage, open, onClose, onDone, fixed = false }: {
   vacancies: ImportVacancy[]; vacancyId?: string; stage: 'MAIN' | string; open: boolean; onClose: () => void; onDone: () => void;
+  /** The vacancy is already chosen on the page (Interview step 2): no department / designation pickers. */
+  fixed?: boolean;
 }) {
   const { can } = useAuth();
   const main = stage === 'MAIN';
@@ -67,7 +69,8 @@ export function MarksImportModal({ vacancies, vacancyId: initial, stage, open, o
         {open_.length > 0 && <Button busy={act.busy} disabled={!accepted || (overwrites > 0 && !overwrite)} onClick={confirm}>Save {accepted} mark(s)</Button>}
       </>}>
       <div className="space-y-4">
-        <div className="grid gap-3 sm:grid-cols-3">
+        {fixed && vacancy && <div className="text-sm"><b>{vacancy.vacancyNo}</b> · {vacancy.department} · {vacancy.positionTitle}</div>}
+        <div className={fixed ? 'hidden' : 'grid gap-3 sm:grid-cols-3'}>
           <Field label="Department"><Select value={pick.departmentId} placeholder="Choose…" disabled={!!batches.length} onChange={(e) => setPick({ departmentId: e.target.value, designation: '', vacancyId: '' })} options={departments.map(([value, label]) => ({ value, label }))} /></Field>
           <Field label="Designation"><Select value={pick.designation} placeholder="Choose…" disabled={!pick.departmentId || !!batches.length} onChange={(e) => setPick({ ...pick, designation: e.target.value, vacancyId: '' })} options={designations.map((d) => ({ value: d, label: d }))} /></Field>
           {choices.length > 1
@@ -78,9 +81,9 @@ export function MarksImportModal({ vacancies, vacancyId: initial, stage, open, o
         {vacancy && (
           <>
             <div className="rounded-md border border-line bg-slate-50 p-3 text-sm">
-              <div className="font-medium">1. Download the template</div>
-              <p className="mt-0.5 text-xs text-muted">It lists every shortlisted candidate of {vacancy.vacancyNo} ({vacancy.department} · {vacancy.positionTitle}) with Application ID, Candidate ID and name{main ? ', with a Written Marks and an Interview Marks column' : ''}. Only fill in the marks.</p>
-              <Button className="mt-2" variant="secondary" size="sm" onClick={() => act.run(() => download(`/vacancies/${vacancy.id}/marks-template?stageType=${main ? 'MAIN' : stage}`))}>Download template (.xlsx)</Button>
+              <div className="font-medium">1. Download the Excel</div>
+              <p className="mt-0.5 text-xs text-muted">It lists every shortlisted candidate of {vacancy.vacancyNo} ({vacancy.department} · {vacancy.positionTitle}) with Application ID, Candidate ID and name{main ? ', with a Written Marks and an Interview Marks column' : ''} and the marks already entered. Fill in or correct the marks only.</p>
+              <Button className="mt-2" variant="secondary" size="sm" onClick={() => act.run(() => download(`/vacancies/${vacancy.id}/marks-template?stageType=${main ? 'MAIN' : stage}`))}>Download Excel (.xlsx)</Button>
             </div>
             <div className="rounded-md border border-line p-3 text-sm">
               <div className="font-medium">2. Upload the filled file</div>

@@ -11,6 +11,8 @@ export class HrQueueQuery extends ListQuery {
   @IsOptional() @IsUUID() departmentId?: string;
   @IsOptional() @IsUUID() companyId?: string;
   @IsOptional() @IsIn(['pending', 'all']) view?: 'pending' | 'all';
+  /** Only requisitions whose final approval fell on this day (Bangladesh time), YYYY-MM-DD (owner, 2026-11-08). */
+  @IsOptional() @IsDateString({ strict: true }) @Length(10, 10, { message: 'approvedOn must be a date (YYYY-MM-DD).' }) approvedOn?: string;
 }
 
 export class CoordinatorDto {

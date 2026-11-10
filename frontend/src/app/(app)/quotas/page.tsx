@@ -24,11 +24,18 @@ export default function QuotasPage() {
       : api('/master/quotas', { body: { companyId: edit.companyId, departmentId: edit.departmentId, positionId: edit.positionId || null, approvedQuota: num(edit.approvedQuota), presentManpower: num(edit.presentManpower), remarks: edit.remarks || undefined } }));
     if (r) { setEdit(null); setCreate(false); state.reload(); }
   };
+  // Department users delete rows of their own department; Super Admin any row (owner, 2026-11-08). The API checks the scope.
+  const remove = async (r: any) => {
+    const label = `${r.department.name} — ${r.level === 'Department' ? 'Department total' : r.position?.title} (${r.company.code})`;
+    if (!window.confirm(`Delete the quota row ${label}? This cannot be undone; the figures stay in the Logs.`)) return;
+    if (await act.run(() => api(`/master/quotas/${r.id}`, { method: 'DELETE' }), `Quota row ${label} deleted.`)) state.reload();
+  };
 
   return (
     <>
       <PageHeader title="Department positions & quota" subtitle="Vacant = approved quota − present manpower. Department and designation figures are kept separate; missing or inconsistent data is flagged rather than shown as a number."
         actions={can(P.QUOTA_EDIT) && <Button onClick={() => { setCreate(true); setEdit({ departmentId: user?.departmentId ?? '', companyId: '', positionId: '' }); }}>Add quota row</Button>} />
+      {!edit && <div className="mb-3 space-y-2"><Alert>{act.error}</Alert><Alert tone="success">{act.message}</Alert></div>}
       <Card pad={false}>
         <div className="flex flex-wrap gap-3 border-b border-line p-3">
           {allDepts && (
@@ -50,7 +57,10 @@ export default function QuotasPage() {
                   <Td>{r.vacancyFlag ? <Badge tone="amber">{r.vacancy !== null ? `${r.vacancy} · ` : ''}{r.vacancyFlag}</Badge> : <span className="tabular-nums">{r.vacancy}</span>}</Td>
                   <Td className="max-w-xs text-muted">{show(r.remarks)}</Td>
                   <Td className="whitespace-nowrap text-xs text-muted">{fmtDateTime(r.updatedAt)}</Td>
-                  <Td>{can(P.QUOTA_EDIT) && <Button size="sm" variant="secondary" onClick={() => { setCreate(false); setEdit({ ...r }); }}>Edit</Button>}</Td>
+                  <Td>{can(P.QUOTA_EDIT) && <div className="flex gap-2">
+                    <Button size="sm" variant="secondary" onClick={() => { setCreate(false); setEdit({ ...r }); }}>Edit</Button>
+                    <Button size="sm" variant="danger" busy={act.busy} onClick={() => remove(r)}>Delete</Button>
+                  </div>}</Td>
                 </tr>
               ))}
             </Table>

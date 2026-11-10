@@ -52,7 +52,7 @@ export function FormView({ r }: { r: any }) {
         <Line label="Seats available" value={yn(r.seatsAvailable)} />
         <Line label="Deadline · Gender" value={`${r.deadlineDays ? `${r.deadlineDays} days` : '—'} · ${show(r.gender)}`} />
         <Line label="Specialization required" value={<SpecializationView value={r} empty="—" />} wide />
-        <Line label="JD of this position" value={show(r.jobDescription)} wide />
+        <Line label="Key Responsibilities" value={show(r.jobDescription)} wide />
         <Line label="Background of the requirement" value={show(r.background)} wide />
       </div>
       <div className="text-sm">

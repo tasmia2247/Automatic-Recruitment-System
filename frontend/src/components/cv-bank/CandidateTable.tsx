@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { Alert, Badge, Button, Field, Input, Loaded, Modal, Pager, Select, Table, Td, Textarea, useAction, useLoad } from '@/components/ui';
+import { Alert, Badge, Button, ConfirmDialog, cx, Field, Input, Loaded, Modal, Pager, ScoreBar, Select, Table, Td, Textarea, useAction, useLoad } from '@/components/ui';
 import { api, fmtDateTime, qs } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
@@ -64,29 +64,67 @@ export function CandidateTable({ vacancyId, q, status, showVacancy = false, onCh
   useEffect(() => setPage(1), [vacancyId, q, status]);
   const state = useLoad(() => api(`/cv-bank/applications${qs({ vacancyId, q, status, page, pageSize: 25 })}`), [vacancyId, q, status, page]);
   const [editing, setEditing] = useState<any | null>(null);
-  const head = ['Candidate', 'Application ID', ...(showVacancy ? ['Department · Company', 'Vacancy / position'] : []), 'CV', 'Criteria met', 'Screening', 'Status', 'Remarks', 'Last updated', ''];
+  const [selected, setSelected] = useState<Record<string, true>>({});
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const del = useAction();
+  useEffect(() => setSelected({}), [vacancyId, q, status, page]);
+  const canDelete = can(P.CANDIDATE_DELETE);
+  const selectedIds = Object.keys(selected);
+  const head = [...(canDelete ? [''] : []), 'Candidate', 'Application ID', ...(showVacancy ? ['Department · Company', 'Vacancy / position'] : []), 'CV', 'Criteria met', 'Screening', 'Status', 'Remarks', 'Last updated', ''];
+  const toggle = (id: string) => setSelected((s) => { const n = { ...s }; if (n[id]) delete n[id]; else n[id] = true; return n; });
+  const doDelete = async (reason: string) => {
+    const r = await del.run(
+      () => api('/cv-bank/applications/delete', { body: { ids: selectedIds, reason: reason || undefined } }),
+      `${selectedIds.length} CV${selectedIds.length === 1 ? '' : 's'} deleted permanently.`,
+    );
+    if (r) { setConfirmingDelete(false); setSelected({}); state.reload(); onChanged?.(); }
+  };
   return (
     <>
+      {canDelete && (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
+          <div className="text-xs text-muted">
+            {selectedIds.length ? <><b className="text-ink">{selectedIds.length}</b> selected on this page</> : 'Tick rows to delete CVs permanently. Joined candidates are kept and cannot be deleted from here.'}
+          </div>
+          <div className="flex items-center gap-2">
+            {selectedIds.length > 0 && <Button size="sm" variant="ghost" onClick={() => setSelected({})}>Clear selection</Button>}
+            <Button size="sm" variant="danger" disabled={!selectedIds.length} onClick={() => setConfirmingDelete(true)}>Delete selected</Button>
+          </div>
+        </div>
+      )}
+      {canDelete && del.message && <div className="p-3"><Alert tone="success">{del.message}</Alert></div>}
       <Loaded state={state} empty={(d: any) => !d.items.length && (q || status ? 'No candidates match these filters.' : 'No CVs have been received for this vacancy yet.')}>
-        {(d: any) => (
+        {(d: any) => {
+          const canSel = (r: any) => r.status !== 'Joined';
+          const sel = d.items.filter(canSel);
+          const allOnPage = sel.length > 0 && sel.every((r: any) => selected[r.applicationId]);
+          const toggleAll = () => setSelected((s) => {
+            if (allOnPage) { const n = { ...s }; for (const r of sel) delete n[r.applicationId]; return n; }
+            const n = { ...s }; for (const r of sel) n[r.applicationId] = true; return n;
+          });
+          return (
           <>
-            <Table head={head}>
+            <Table head={canDelete ? [<input key="all" type="checkbox" aria-label="Select all on this page" checked={allOnPage} disabled={!sel.length} onChange={toggleAll} />, ...head.slice(1)] : head}>
               {d.items.map((r: any) => (
-                <tr key={r.applicationId} className="bg-white hover:bg-slate-50">
+                <tr key={r.applicationId} className={cx('bg-white hover:bg-slate-50', selected[r.applicationId] && 'bg-red-50/60 hover:bg-red-50')}>
+                  {canDelete && <Td>{canSel(r)
+                    ? <input type="checkbox" aria-label={`Select ${r.applicationNo}`} checked={!!selected[r.applicationId]} onChange={() => toggle(r.applicationId)} />
+                    : <input type="checkbox" disabled title="Joined candidate — their records cannot be deleted from here" />}</Td>}
                   <Td><div className="font-medium">{r.name ?? <i className="text-amber-700">Name needs review</i>}</div><div className="text-xs text-muted">{r.candidateNo}</div></Td>
                   <Td className="whitespace-nowrap text-xs">{r.applicationNo}{r.duplicateReview === 'PENDING' && <div><Badge tone="amber">Possible duplicate</Badge></div>}</Td>
                   {showVacancy && <Td className="text-xs">{r.department}<div className="text-muted">{r.company}</div></Td>}
                   {showVacancy && <Td className="text-xs">{r.positionTitle}<div className="text-muted">{r.vacancyNo}</div></Td>}
                   <Td className="whitespace-nowrap text-xs">
-                    {!r.documentId ? '—' : can(P.CV_DOWNLOAD) ? (
+                    {!r.documentId ? '—' : !can(P.CV_DOWNLOAD) ? <span className="text-muted">No access</span> : r.hasFile ? (
+                      // Only a CV that could not be read still has its file (kept until HR enters the data).
                       <div className="flex flex-col gap-0.5">
                         <a className="text-brand-700 hover:underline" target="_blank" rel="noreferrer" href={`/api/documents/${r.documentId}`}>Preview</a>
                         <a className="text-brand-700 hover:underline" href={`/api/documents/${r.documentId}?download=1`}>Download</a>
                       </div>
-                    ) : <span className="text-muted">No access</span>}
+                    ) : <Link className="text-brand-700 hover:underline" href={`/applications/${r.applicationId}`} title="The file is not kept; open the text read from it">CV text</Link>}
                   </Td>
                   <Td className="whitespace-nowrap text-xs tabular-nums">{r.criteriaTotal ? <>{r.criteriaMet} / {r.criteriaTotal}<div className="text-muted">{r.screeningBasis === 'REQUISITION' || r.screeningBasis === 'VACANCY' ? 'requirements' : `criteria v${r.criteriaVersion}`}</div></> : '—'}</Td>
-                  <Td>{r.screeningResult ? <Badge>{r.screeningResult}</Badge> : <span className="text-xs text-muted">{r.processingStatus === 'Failed' ? 'CV processing failed' : 'Not screened'}</span>}</Td>
+                  <Td>{r.screeningResult ? <Badge>{r.screeningResult}</Badge> : <span className="text-xs text-muted">{r.processingStatus === 'Failed' ? 'CV processing failed' : 'Not screened'}</span>}{r.screeningScore != null && <ScoreBar score={r.screeningScore} />}</Td>
                   <Td>
                     <Badge>{r.status}</Badge>
                     {r.transitions.length > 0 && <div className="mt-1"><Button size="sm" variant="ghost" onClick={() => setEditing(r)}>Change</Button></div>}
@@ -99,12 +137,23 @@ export function CandidateTable({ vacancyId, q, status, showVacancy = false, onCh
             </Table>
             <Pager page={d.page} pageSize={d.pageSize} total={d.total} onPage={setPage} />
           </>
-        )}
+          );
+        }}
       </Loaded>
       {editing && <StatusModal row={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); state.reload(); onChanged?.(); }} />}
+      <ConfirmDialog open={confirmingDelete} danger title={`Delete ${selectedIds.length} CV${selectedIds.length === 1 ? '' : 's'}?`}
+        confirmLabel="Delete permanently" requireReason={false} reasonLabel="Reason (optional)"
+        busy={del.busy} error={del.error} onClose={() => setConfirmingDelete(false)} onConfirm={doDelete}
+        message={<div className="space-y-2">
+          <p>This permanently deletes the selected application{selectedIds.length === 1 ? '' : 's'} with their CV files, extracted data, screening runs, remarks, interview records, marks, pending joining entries and sent emails. It cannot be undone.</p>
+          <p>A candidate who is left with no other application anywhere is deleted too; a candidate who also applied to another vacancy is kept.</p>
+          <p className="rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">Joined candidates are not touched. If any selected CV belongs to a candidate who has already joined anywhere, the delete is refused and the list is kept as it is.</p>
+          <p className="text-muted">The Logs keep a record of the delete and your reason.</p>
+        </div>} />
     </>
   );
 }
+
 
 /** Search box and status filter; typing waits briefly so each keystroke does not send a request. */
 export function CandidateFilters({ onChange, searchLabel }: { onChange: (f: { q: string; status: string }) => void; searchLabel: string }) {

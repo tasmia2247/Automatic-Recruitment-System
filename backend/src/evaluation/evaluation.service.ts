@@ -43,7 +43,7 @@ export class EvaluationService {
       rows: apps.map((a) => ({
         applicationId: a.id, applicationNo: a.applicationNo, candidateNo: a.candidate.candidateNo, name: a.candidate.name,
         email: a.candidate.email, phone: a.candidate.phone, screeningResult: a.screeningResult, shortlisted: a.shortlisted,
-        finalDecision: a.finalDecision, finalDecisionRemarks: a.finalDecisionRemarks,
+        finalDecision: a.finalDecision, finalDecisionRemarks: a.finalDecisionRemarks, expectedSalary: a.expectedSalary,
         stages: Object.fromEntries(stages.filter((s) => s.applicationId === a.id).map((s) => [s.stageType, s])),
         marks: marks.filter((mk) => mk.applicationId === a.id).map((mk) => ({ ...mk, evaluator: { name: mk.evaluator.name } })),
         joining: joins.find((j) => j.applicationId === a.id) ?? null,
@@ -76,7 +76,7 @@ export class EvaluationService {
       rows: apps.map((a) => ({
         applicationId: a.id, applicationNo: a.applicationNo, candidateNo: a.candidate.candidateNo, name: a.candidate.name,
         email: a.candidate.email, phone: a.candidate.phone, screeningResult: a.screeningResult, shortlisted: a.shortlisted,
-        finalDecision: a.finalDecision, finalDecisionRemarks: a.finalDecisionRemarks,
+        finalDecision: a.finalDecision, finalDecisionRemarks: a.finalDecisionRemarks, expectedSalary: a.expectedSalary,
         vacancy: { id: a.vacancy.id, vacancyNo: a.vacancy.vacancyNo, positionTitle: a.vacancy.positionTitle, status: a.vacancy.status,
           departmentId: a.vacancy.departmentId, department: a.vacancy.department.name, company: a.vacancy.company.code },
         stages: Object.fromEntries(stages.filter((s) => s.applicationId === a.id).map((s) => [s.stageType, s])),
@@ -177,7 +177,14 @@ export class EvaluationService {
     ];
     ws.getRow(1).font = { bold: true };
     ws.views = [{ state: 'frozen', ySplit: 1 }];
-    for (const r of board.rows) ws.addRow({ app: r.applicationNo, cand: r.candidateNo, name: r.name ?? '' });
+    // Marks already entered are filled in (owner, 2026-11-09), so the sheet works as an export to correct and upload again.
+    const mark = (r: (typeof board.rows)[number], s: StageType) => r.marks.find((x) => x.stageType === s && x.component === 'Total')?.marks ?? null;
+    for (const r of board.rows) {
+      ws.addRow({
+        app: r.applicationNo, cand: r.candidateNo, name: r.name ?? '',
+        ...(stageType === 'MAIN' ? { written: mark(r, 'WRITTEN'), interview: mark(r, 'INTERVIEW') } : { marks: mark(r, stageType) }),
+      });
+    }
     const safe = (s?: string) => (s ?? '').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '');
     const kind = stageType === 'MAIN' ? 'written_interview' : stageType.toLowerCase();
     return { fileName: `${board.vacancy.vacancyNo}_${safe(board.vacancy.department)}_${safe(board.vacancy.positionTitle)}_${kind}_marks.xlsx`, buffer: Buffer.from(await wb.xlsx.writeBuffer()) };
@@ -311,7 +318,8 @@ export class EvaluationService {
         throw new ForbiddenException(`${overwrites.length} row(s) would replace existing marks. Confirm overwrite (requires overwrite permission) or remove them from the file.`);
       }
       let saved = 0;
-      for (const r of rows.filter((x) => x.status !== 'Error')) {
+      // A mark the sheet repeats unchanged (the downloaded Excel carries the marks already entered) is left as it is.
+      for (const r of rows.filter((x) => x.status !== 'Error' && !(x.previousMarks !== null && Number(x.previousMarks) === Number(x.marks)))) {
         const existing = await m.findOne(EvaluationMark, { where: { applicationId: r.applicationId!, stageType: b.stageType, component: b.component } });
         if (existing) {
           await m.update(EvaluationMark, existing.id, { marks: r.marks!, maxMarks: b.maxMarks ?? existing.maxMarks, evaluatorId: me.id, importBatchId: b.id });
@@ -337,7 +345,63 @@ export class EvaluationService {
 
   // ------------------------------------------------------------------ final decision
 
+  /**
+   * "Remove" on the Interview page (owner, 2026-11-09): a candidate brought in by mistake goes back one stage. Their interview record
+   * goes (every round's date, venue, attendance and result, and their marks), kept in the audit entry; `screening` also takes them
+   * off the shortlist, so they leave the Interview page and are back on the vacancy's Candidates tab. A final decision must be
+   * undone first (step 3), and a candidate who has joined cannot be moved.
+   */
+  async moveBack(applicationId: string, to: 'schedule' | 'screening', me: AuthUser) {
+    return this.ds.transaction(async (m) => {
+      const app = await m.findOne(Application, { where: { id: applicationId }, lock: { mode: 'pessimistic_write' } });
+      if (!app) throw new NotFoundException('Application not found.');
+      const joining = await m.findOne(JoiningRecord, { where: { applicationId } });
+      if (joining?.status === 'Approved') throw new ConflictException('Already joined; cannot be moved back.');
+      if (!['Pending', 'On Hold'].includes(app.finalDecision)) {
+        throw new ConflictException(`The final decision is ${app.finalDecision}. Remove it from step 3 (Select for joining) first.`);
+      }
+      const stages = await m.find(CandidateStage, { where: { applicationId } });
+      const marks = await m.find(EvaluationMark, { where: { applicationId } });
+      if (to === 'screening' && !app.shortlisted && !stages.length) return { applicationId, changed: false };
+      if (to === 'schedule' && !stages.length && !marks.length) return { applicationId, changed: false };
+      await m.delete(EvaluationMark, { applicationId });
+      await m.delete(CandidateStage, { applicationId });
+      if (to === 'screening') await m.update(Application, applicationId, { shortlisted: false, shortlistReason: null, shortlistedById: me.id, shortlistedAt: new Date() });
+      await this.audit.log(m, me, to === 'screening' ? 'interview.remove_to_screening' : 'interview.remove_to_schedule', 'Application', applicationId, {
+        label: app.applicationNo,
+        old: {
+          shortlisted: app.shortlisted,
+          stages: stages.map((s) => ({ stage: s.stageType, scheduledAt: s.scheduledAt, location: s.location, attendance: s.attendance, result: s.result })),
+          marks: marks.map((k) => ({ stage: k.stageType, component: k.component, marks: k.marks, maxMarks: k.maxMarks })),
+        },
+        new: { stage: to === 'screening' ? 'Candidates & screening' : 'Interview step 1 (Schedule)' },
+      });
+      return { applicationId, changed: true };
+    });
+  }
+
   /** Final HR decision (SRS 14.1). Earlier stage results are untouched; Selected => Joining Pending. */
+  /** One candidate of the board's "Send to joining": final decision Selected (kept as is when already Selected), then the planned joining date. */
+  async sendToJoining(applicationId: string, joiningDate: string, me: AuthUser) {
+    const app = await this.ds.getRepository(Application).findOne({ where: { id: applicationId } });
+    if (!app) throw new NotFoundException('Application not found.');
+    const existing = await this.ds.getRepository(JoiningRecord).findOne({ where: { applicationId } });
+    if (existing?.status === 'Approved') throw new ConflictException('Already joined.');
+    if (existing?.status === 'Rejected') throw new ConflictException('Rejected at joining; move them back to pending on the Joining page first.');
+    if (app.finalDecision !== 'Selected') await this.finalDecision(applicationId, 'Selected', app.finalDecisionRemarks ?? undefined, me);
+    return this.ds.transaction(async (m) => {
+      const j = await m.findOne(JoiningRecord, { where: { applicationId }, lock: { mode: 'pessimistic_write' } });
+      if (!j || j.status !== 'Pending') throw new ConflictException('The joining record is not pending.');
+      if (j.joiningDate !== joiningDate) {
+        const old = j.joiningDate;
+        j.joiningDate = joiningDate;
+        await m.save(j);
+        await this.audit.log(m, me, 'joining.update', 'Application', applicationId, { label: app.applicationNo, old: { joiningDate: old }, new: { joiningDate } });
+      }
+      return j;
+    });
+  }
+
   async finalDecision(applicationId: string, decision: DecisionStatus, remarks: string | undefined, me: AuthUser) {
     return this.ds.transaction(async (m) => {
       const app = await m.findOne(Application, { where: { id: applicationId }, lock: { mode: 'pessimistic_write' } });

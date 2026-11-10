@@ -140,7 +140,7 @@ export function DecisionDialog({ row, decision, onClose, onSaved }: { row: any |
 export const pastWarning = (local: string) => (local && new Date(local).getTime() < Date.now() ? <Alert tone="warning">This date and time is in the past. Check it, unless you are recording an exam that was already held.</Alert> : null);
 
 /** Schedules or reschedules the main day (written + interview) or the optional exam for several candidates, of any vacancy, at once. */
-export function ScheduleDialog({ open, count, applicationIds, onClose, onSaved }: { open: boolean; count: number; applicationIds: string[]; onClose: () => void; onSaved: (msg: string) => void }) {
+export function ScheduleDialog({ open, count, applicationIds, onClose, onSaved, mainOnly = false }: { open: boolean; count: number; applicationIds: string[]; onClose: () => void; onSaved: (msg: string) => void; mainOnly?: boolean }) {
   const act = useAction();
   const [f, setF] = useState({ kind: 'MAIN' as Kind, when: '', durationMinutes: '120', location: '', panel: '' });
   useEffect(() => { if (open) setF((x) => ({ ...x, when: '' })); }, [open]);
@@ -156,10 +156,10 @@ export function ScheduleDialog({ open, count, applicationIds, onClose, onSaved }
     }
   };
   return (
-    <Modal open={open} title={`Schedule ${count} candidate${count === 1 ? '' : 's'}`} onClose={onClose}
+    <Modal open={open} title={`Set interview date & time · ${count} candidate${count === 1 ? '' : 's'}`} onClose={onClose}
       footer={<><Button variant="secondary" onClick={onClose}>Cancel</Button><Button busy={act.busy} disabled={!f.when} onClick={save}>Save schedule</Button></>}>
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Exam" className="sm:col-span-2"><Select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value as Kind, durationMinutes: e.target.value === 'MAIN' ? '120' : '60' })}
+        <Field label="Exam" className={mainOnly ? 'hidden' : 'sm:col-span-2'}><Select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value as Kind, durationMinutes: e.target.value === 'MAIN' ? '120' : '60' })}
           options={[{ value: 'MAIN', label: 'Written exam & interview board (same day)' }, { value: 'OPTIONAL', label: 'Optional exam' }]} /></Field>
         <Field label="Date & time" required><Input type="datetime-local" value={f.when} onChange={(e) => setF({ ...f, when: e.target.value })} /></Field>
         <Field label="Duration (each)"><Select value={f.durationMinutes} onChange={(e) => setF({ ...f, durationMinutes: e.target.value })} options={DURATIONS.map((m) => ({ value: String(m), label: durationLabel(m) }))} /></Field>

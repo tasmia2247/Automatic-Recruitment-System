@@ -27,9 +27,3 @@ export class SendDto extends ComposeDto {
   /** Bulk sending requires explicit confirmation after preview (SRS 12.4). */
   @IsBoolean() @Equals(true, { message: 'Confirm the preview before sending.' }) confirmed: boolean;
 }
-
-export class HistoryQuery {
-  @IsOptional() @IsUUID() vacancyId?: string;
-  @IsOptional() @IsIn(['Queued', 'Sent', 'Failed']) status?: string;
-  @IsOptional() @IsString() @MaxLength(30) kind?: string;
-}

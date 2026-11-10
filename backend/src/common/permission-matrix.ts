@@ -68,6 +68,7 @@ export const PERMISSION_MATRIX: MatrixModule[] = [
     extras: [
       { code: P.CV_DOWNLOAD, label: 'Open / download CV files' }, { code: P.SCREENING_RUN, label: 'Run screening' },
       { code: P.SHORTLIST_OVERRIDE, label: 'Override a Fail when shortlisting' },
+      { code: P.CANDIDATE_DELETE, label: 'Delete selected CVs permanently' },
     ],
   },
   {
@@ -89,5 +90,6 @@ export const PERMISSION_MATRIX: MatrixModule[] = [
   { key: 'users', label: 'Users & Roles', actions: { manage: [P.USER_MANAGE] } },
   { key: 'approval_config', label: 'Approval Configuration', actions: { manage: [P.APPROVAL_ROUTE_CONFIGURE] } },
   { key: 'monitor', label: 'Processing Monitor', actions: { view: [P.MONITOR_VIEW], edit: [P.MONITOR_RETRY] } },
-  { key: 'audit', label: 'Audit Log', actions: { view: [P.AUDIT_VIEW] } },
+  { key: 'audit', label: 'Logs', actions: { view: [P.AUDIT_VIEW] } },
+  { key: 'reports', label: 'Reports & Analytics', actions: { view: [P.REPORTS_VIEW] } },
 ];

@@ -179,7 +179,7 @@ through HTTP and asserts acceptance criteria **AC-01 … AC-27** (AC-28, backup/
 | Direct HR vacancy | Enabled, only with `vacancy.create_direct` permission, marked *Direct HR Entry*, reason required | `ALLOW_DIRECT_HR_VACANCY`, role permissions |
 | Revised quota | Stays a proposal; applied to the quota list only when Corporate HR sets *Inserted in quota chart? = Yes* after full approval | Corporate HR panel on the requisition |
 | Mail intake | HR saves mails as `.eml` files, then chooses that folder on CV Bank → Unmatched CVs or uses the `backend/mail-inbox` folder, and scans. There is no live mailbox connection | `MAIL_INTAKE_DIR` |
-| CV formats / size | PDF, DOCX, DOC, TXT; 10 MB. DOC (legacy Word) and scanned PDFs are stored but marked *Failed* for manual review | `ALLOWED_CV_EXTENSIONS`, `MAX_UPLOAD_MB` |
+| CV formats / size | PDF, DOCX, DOC, TXT; 10 MB. DOC (legacy Word, or RTF / web page saved as .doc) is read since 2026-11-09; scanned PDFs are marked *Failed* for manual review | `ALLOWED_CV_EXTENSIONS`, `MAX_UPLOAD_MB` |
 | CV extraction | Deterministic rules (`rules-1.2`): contact, education, CGPA, experience, last position and organization, skills, address, certifications, previous jobs; values only if literally present; GPA normalised only when on a /4 scale | `cv-extractor.ts` |
 | Duplicate detection | Same normalised email, same phone (last 10 digits) or identical file → *flagged*; HR chooses merge / keep separate. Never auto-merged | `detectDuplicate()` |
 | Screening | Against the requisition's *Specialization required* (a Direct HR vacancy's own): every item written in the CV = Pass, otherwise Review Required | Requisition form, vacancy page |
@@ -195,7 +195,8 @@ through HTTP and asserts acceptance criteria **AC-01 … AC-27** (AC-28, backup/
   enforced in queries. Auth is an httpOnly cookie (JWT); passwords are bcrypt-hashed.
 * Critical writes run in transactions with row locks; unique constraints make vacancy creation, approvals,
   email batches (`clientKey`), marks and joining records idempotent.
-* CVs and attachments live in `STORAGE_DIR` outside the web root and are served only through authorised routes.
+* CV files are not kept once read: ARS keeps the text read from them and deletes the file (a CV that could not be read keeps its file until
+  HR enters the data). Other attachments live in `STORAGE_DIR` outside the web root and are served only through authorised routes.
 * The audit log (`audit_events`) is append-only from the application and readable only with `audit.view`.
 
 ## Backup and restore (NFR-12 / AC-28)

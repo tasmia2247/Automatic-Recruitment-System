@@ -6,6 +6,7 @@ import { EntityManager } from 'typeorm';
 import { config } from '../config';
 import { AuditEvent, Notification } from '../database/entities';
 import { AuthUser } from './auth';
+import { docKind } from './file-kind';
 
 /** Generates human-readable display IDs from configurable formats (SRS 2.1). */
 @Injectable()
@@ -72,7 +73,7 @@ export class NotificationService {
     const rows: { id: string }[] = await manager.query(
       `SELECT DISTINCT u.id FROM users u
          LEFT JOIN user_roles ur ON ur."userId" = u.id
-         LEFT JOIN roles r ON r.id = ur."roleId" AND r.active
+         LEFT JOIN roles r ON r.id = ur."roleId"
         WHERE u.active AND NOT ($1 = ANY(u."deniedPermissions"))
           AND ($1 = ANY(r.permissions) OR $1 = ANY(u."extraPermissions"))`,
       [perm],
@@ -127,6 +128,8 @@ export function validateUpload(file: Express.Multer.File, allowed = config.allow
   const head = file.buffer.subarray(0, 4);
   if (ext === 'pdf' && head.toString('latin1') !== '%PDF') return 'File content is not a valid PDF.';
   if ((ext === 'docx' || ext === 'xlsx') && !(head[0] === 0x50 && head[1] === 0x4b)) return `File content is not a valid .${ext} document.`;
+  // A ".doc" must be a Word file (or a DOCX, RTF or web page saved as .doc), never a renamed program (2026-11-09).
+  if (ext === 'doc' && !docKind(file.buffer)) return 'File content is not a valid Word .doc document.';
   return null;
 }
 

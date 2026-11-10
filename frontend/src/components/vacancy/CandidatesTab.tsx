@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, download, qs, show, uploadBatches } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 import { EmailComposer } from '../EmailComposer';
-import { Alert, Badge, Button, Card, ConfirmDialog, Input, Loaded, Pager, Select, Table, Td, useAction, useLoad } from '../ui';
+import { Alert, Badge, Button, Card, ConfirmDialog, Input, Loaded, Pager, ScoreBar, Select, Table, Td, useAction, useLoad } from '../ui';
 
 /** CV files the API accepts; anything else in a chosen folder is skipped. */
 const CV_EXTENSIONS = ['.pdf', '.docx', '.doc', '.txt'];
@@ -88,7 +88,7 @@ export function CandidatesTab({ vacancy }: { vacancy: any }) {
   return (
     <div className="space-y-4">
       {can(P.CV_UPLOAD) && (
-        <Card title="Add CVs" actions={<span className="text-xs text-muted">PDF, DOCX or TXT · each file is processed separately</span>}>
+        <Card title="Add CVs" actions={<span className="text-xs text-muted">PDF, DOC, DOCX or TXT · each file is processed separately</span>}>
           <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="min-w-0 text-sm">
@@ -97,7 +97,7 @@ export function CandidatesTab({ vacancy }: { vacancy: any }) {
                   <>
                     Folder <span className="font-semibold">{folder.name}</span>: <span className="font-semibold">{folder.cvs.length}</span> CV{folder.cvs.length === 1 ? '' : 's'} found
                     {folder.others > 0 && <span className="text-muted"> ({folder.others} other file{folder.others === 1 ? '' : 's'} skipped)</span>}
-                    {!folder.cvs.length && <div className="text-xs text-amber-700">No PDF, DOCX or TXT files in this folder.</div>}
+                    {!folder.cvs.length && <div className="text-xs text-amber-700">No PDF, DOC, DOCX or TXT files in this folder.</div>}
                   </>
                 ) : <span className="text-muted">Keep every CV for this job in one folder on your computer, wherever it came from, then choose and scan it. All of them go into this vacancy.</span>}
                 {progress && <div className="text-xs text-muted">{progress}</div>}
@@ -131,7 +131,7 @@ export function CandidatesTab({ vacancy }: { vacancy: any }) {
 
       <Alert tone={vacancy.screening?.items.length ? 'info' : 'warning'}>
         {vacancy.screening?.items.length
-          ? <>Screening checks the <b>Specialization required</b> {vacancy.screening.reqNo ? <>of requisition {vacancy.screening.reqNo}</> : 'of this Direct HR vacancy'}: {vacancy.screening.items.join(' · ')}. A CV passes when it meets all of these; otherwise it goes to Review Required with the reason.</>
+          ? <>Screening checks the <b>Specialization required</b> {vacancy.screening.reqNo ? <>of requisition {vacancy.screening.reqNo}</> : 'of this Direct HR vacancy'}{vacancy.screening.keyResponsibilities ? ' and its Key Responsibilities' : ''}: {vacancy.screening.items.join(' · ')}. A CV passes when it meets all of these; otherwise it goes to Review Required with the reason. Candidates are ranked by match score within each result.</>
           : vacancy.screening?.reqNo
             ? <>Requisition {vacancy.screening.reqNo} has no Specialization required, so CVs are not screened.</>
             : <>This Direct HR vacancy has no Specialization required yet, so CVs are not screened. Set it on the Overview tab.</>}
@@ -149,11 +149,12 @@ export function CandidatesTab({ vacancy }: { vacancy: any }) {
         <div className="flex flex-wrap items-center gap-2 border-b border-line p-3">
           <Input className="max-w-[14rem]" placeholder="Search name, email, ID, institution…" value={filters.q} onChange={(e) => setF('q', e.target.value)} />
           <Select className="max-w-[11rem]" value={filters.result} onChange={(e) => setF('result', e.target.value)} placeholder="All results" options={['Pass', 'Review Required', 'Fail'].map((s) => ({ value: s, label: s }))} />
-          <Select className="max-w-[12rem]" value={filters.sort} onChange={(e) => setF('sort', e.target.value)} placeholder="Sort: result group" options={[['cgpa', 'CGPA'], ['experience', 'Experience'], ['name', 'Name'], ['institution', 'Institution'], ['degree', 'Degree'], ['received', 'Received']].map(([v, l]) => ({ value: v, label: `Sort: ${l}` }))} />
+          <Select className="max-w-[12rem]" value={filters.sort} onChange={(e) => setF('sort', e.target.value)} placeholder="Sort: result, then score" options={[['score', 'Match score'], ['cgpa', 'CGPA'], ['experience', 'Experience'], ['name', 'Name'], ['institution', 'Institution'], ['degree', 'Degree'], ['received', 'Received']].map(([v, l]) => ({ value: v, label: `Sort: ${l}` }))} />
           {filters.sort && <Select className="max-w-[8rem]" value={filters.dir} onChange={(e) => setF('dir', e.target.value)} options={[{ value: 'DESC', label: 'High → low' }, { value: 'ASC', label: 'Low → high' }]} />}
           <label className="flex items-center gap-1 text-sm"><input type="checkbox" checked={filters.shortlisted === 'true'} onChange={(e) => setF('shortlisted', e.target.checked ? 'true' : '')} className="accent-brand-600" /> Shortlisted only</label>
           <label className="flex items-center gap-1 text-sm"><input type="checkbox" checked={filters.duplicate === 'true'} onChange={(e) => setF('duplicate', e.target.checked ? 'true' : '')} className="accent-brand-600" /> Duplicate review</label>
           <div className="flex-1" />
+          {can(P.SCREENING_RUN) && <Button size="sm" variant="secondary" title="Read every CV of this vacancy again with the latest reading rules, then screen it again. Fields you corrected are kept." onClick={() => act.run(() => api(`/vacancies/${vacancy.id}/reread`, { method: 'POST' }), (r: any) => `${r.queued} CV(s) queued to be read again and re-screened. Fields corrected by hand are kept.`).then(() => setTimeout(state.reload, 2500))}>Re-read CVs</Button>}
           {can(P.SCREENING_RUN) && <Button size="sm" variant="secondary" onClick={() => act.run(() => api(`/vacancies/${vacancy.id}/rescreen`, { method: 'POST' }), (r: any) => `${r.queued} application(s) queued for re-screening against the Specialization required.`).then(() => setTimeout(state.reload, 1500))}>Re-run screening</Button>}
           {can(P.EXPORT) && <Button size="sm" variant="secondary" onClick={() => act.run(() => download(`/vacancies/${vacancy.id}/export${qs({ result: filters.result })}`))}>Export Excel</Button>}
         </div>
@@ -186,6 +187,7 @@ export function CandidatesTab({ vacancy }: { vacancy: any }) {
                     <Td className="tabular-nums">{show(a.age)}</Td>
                     <Td className="text-xs">{a.candidate.email ?? <span className="text-amber-700">no email</span>}<div className="text-muted">{a.candidate.phone ?? ''}</div></Td>
                     <Td>{a.screeningResult ? <Badge>{a.screeningResult}</Badge> : <Badge>Not screened</Badge>}
+                      {a.screeningScore != null && <ScoreBar score={a.screeningScore} />}
                       {['Queued', 'Processing', 'Received'].includes(a.processingStatus) && <div className="mt-1 text-xs text-muted">Reading CV…</div>}
                       {a.processingError && <div className="mt-1 max-w-[14rem] text-xs text-red-700">{a.processingError}</div>}
                       {a.screeningReasons?.length > 0 && <div className="mt-1 max-w-[16rem] text-xs text-muted">{a.screeningReasons.join(' ')}</div>}</Td>

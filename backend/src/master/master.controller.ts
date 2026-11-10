@@ -160,10 +160,16 @@ export class MasterController {
     if (scope) where.departmentId = In(q.departmentId && scope.includes(q.departmentId) ? [q.departmentId] : scope);
     else if (q.departmentId) where.departmentId = q.departmentId;
     if (q.companyId) where.companyId = q.companyId;
+    // Dept-total rows grouped at the top, then designation rows under them (owner, 2026-11-09): department totals are
+    // the reference figure, and admins want to edit them together without scrolling through every designation row.
     const rows = await this.ds.getRepository(ManpowerQuota).find({
       where, relations: { company: true, department: true, position: true },
-      order: { department: { name: 'ASC' } },
     });
+    rows.sort((a, b) =>
+      Number(!!a.positionId) - Number(!!b.positionId)
+      || a.department.name.localeCompare(b.department.name)
+      || a.company.code.localeCompare(b.company.code)
+      || (a.position?.title ?? '').localeCompare(b.position?.title ?? ''));
     return rows.map((r) => {
       const v = computeVacancy(r.approvedQuota, r.presentManpower);
       return { ...r, level: r.positionId ? 'Designation' : 'Department', vacancy: v.value, vacancyFlag: v.flag };
@@ -200,6 +206,27 @@ export class MasterController {
       await m.save(rec);
       await this.audit.log(m, me, 'quota.update', 'ManpowerQuota', rec.id, d);
       return rec;
+    });
+  }
+
+  /**
+   * Deletes a quota row (owner, 2026-11-08): `quota.edit` within the user's quota scope, so a department user only in their own
+   * department and Super Admin anywhere. Nothing refers to a quota row by key (a quota-chart update finds or recreates the row),
+   * so no history is lost; the figures are kept in the audit entry.
+   */
+  @Delete('quotas/:id')
+  @RequirePerm(P.QUOTA_EDIT)
+  async deleteQuota(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
+    return this.ds.transaction(async (m) => {
+      const rec = await m.findOne(ManpowerQuota, { where: { id }, relations: { department: true, position: true } });
+      if (!rec) throw new NotFoundException();
+      assertDepartmentAccess(me, rec.departmentId, 'quotas');
+      await m.delete(ManpowerQuota, id);
+      await this.audit.log(m, me, 'quota.delete', 'ManpowerQuota', id, {
+        label: `${rec.department.name} — ${rec.position?.title ?? 'Department total'}`,
+        old: { companyId: rec.companyId, departmentId: rec.departmentId, positionId: rec.positionId, approvedQuota: rec.approvedQuota, presentManpower: rec.presentManpower, remarks: rec.remarks },
+      });
+      return { deleted: true };
     });
   }
 }

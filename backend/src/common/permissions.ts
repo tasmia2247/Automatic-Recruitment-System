@@ -44,6 +44,8 @@ export const P = {
   CV_UPLOAD: 'cv.upload',
   CV_DOWNLOAD: 'cv.download',
   CANDIDATE_MERGE: 'candidate.duplicate_review',
+  /** Permanently delete selected CVs / applications from the CV bank (Super Admin). */
+  CANDIDATE_DELETE: 'candidate.delete',
   SCREENING_RUN: 'screening.run',
   EXPORT: 'report.export',
   SHORTLIST: 'selection.shortlist',
@@ -70,32 +72,45 @@ export const P = {
   DASHBOARD_DEPT: 'dashboard.department',
   DASHBOARD_HR: 'dashboard.hr',
   DASHBOARD_ADMIN: 'dashboard.admin',
+  // Reports & Analytics
+  REPORTS_VIEW: 'report.view',
 } as const;
 
 export type Permission = (typeof P)[keyof typeof P];
 export const ALL_PERMISSIONS: Permission[] = Object.values(P);
 
-/** HR user: works only on the vacancies they are coordinator of (no HR queue, no vacancy creation). */
+/**
+ * HR Coordinator (formerly "HR") handles recruitment end-to-end on assigned vacancies: CV intake, screening,
+ * interview & exam marks, selection, joining. The role name was consolidated on 2026-11-10 (owner) to replace
+ * the earlier splinter roles (Corporate HR / CV Screening User / Interview Examiner / Read-only) — those four
+ * are kept inactive in the catalog for existing data, but no longer offered when assigning new users.
+ */
 const HR_CORE: Permission[] = [
   P.MASTER_VIEW, P.QUOTA_VIEW, P.QUOTA_VIEW_ALL, P.REQ_VIEW, P.REQ_VIEW_ALL, P.VACANCY_VIEW, P.VACANCY_EDIT, P.JOBPOST_EDIT,
   P.CANDIDATE_VIEW, P.CANDIDATE_EDIT, P.CV_UPLOAD, P.CV_DOWNLOAD, P.CANDIDATE_MERGE, P.SCREENING_RUN, P.EXPORT, P.SHORTLIST,
   P.SHORTLIST_OVERRIDE, P.ATTENDANCE, P.MARKS_ENTER, P.MARKS_IMPORT, P.MARKS_OVERWRITE, P.FINAL_DECISION, P.EMAIL_SEND,
-  P.TEMPLATE_MANAGE, P.JOINING_VIEW, P.JOINED_VIEW, P.JOINING_APPROVE, P.MONITOR_VIEW, P.DASHBOARD_HR,
+  P.TEMPLATE_MANAGE, P.JOINING_VIEW, P.JOINED_VIEW, P.JOINING_APPROVE, P.MONITOR_VIEW, P.DASHBOARD_HR, P.REPORTS_VIEW,
 ];
 
 /** Roles whose active members can be chosen as a vacancy's HR coordinator. */
-export const COORDINATOR_ROLES = ['HR_RECRUITER', 'HR_MANAGER'];
+export const COORDINATOR_ROLES = ['HR_COORDINATOR', 'HR_MANAGER'];
+
+/**
+ * Legacy roles kept on the books (so earlier user assignments and test data stay valid) but removed from the
+ * assignable role pickers on 2026-11-10 (owner). Code paths that render role options should filter these out.
+ */
+export const LEGACY_ROLES = new Set(['CORPORATE_HR', 'CV_SCREENER', 'EXAMINER', 'READ_ONLY']);
 
 /** Default role matrix (Roles & Permissions specification). Super Admin can edit role permissions at runtime. */
-export const DEFAULT_ROLES: { code: string; name: string; description: string; permissions: Permission[] }[] = [
+export const DEFAULT_ROLES: { code: string; name: string; description: string; permissions: Permission[]; active?: boolean }[] = [
   {
-    code: 'DEPT_REQUESTER', name: 'Department',
-    description: 'Own department: positions & quota, requisitions and their status, joined candidates.',
+    code: 'DEPT_REQUESTER', name: 'Department Head',
+    description: 'Head of a department: own department\'s positions & quota, requisitions and their status, joined candidates.',
     permissions: [P.MASTER_VIEW, P.QUOTA_VIEW, P.QUOTA_EDIT, P.REQ_VIEW, P.REQ_CREATE, P.REQ_EDIT, P.REQ_SUBMIT, P.REQ_CANCEL, P.JOINED_VIEW, P.DASHBOARD_DEPT],
   },
   {
-    code: 'HR_RECRUITER', name: 'HR',
-    description: 'Recruitment of the vacancies assigned to them as coordinator; all requisitions and quotas (view).',
+    code: 'HR_COORDINATOR', name: 'HR Coordinator',
+    description: 'Recruitment of assigned vacancies end to end: CV intake, screening, interviews, selection, joining; every department\'s requisitions and quotas in view.',
     permissions: HR_CORE,
   },
   {
@@ -106,7 +121,7 @@ export const DEFAULT_ROLES: { code: string; name: string; description: string; p
   {
     code: 'ADMIN', name: 'Admin',
     description: 'Views all requisitions; approves, returns or rejects them from the Approver Inbox (one approval is final).',
-    permissions: [P.MASTER_VIEW, P.REQ_VIEW, P.REQ_VIEW_ALL, P.APPROVAL_ACT, P.ACT_ON_BEHALF, P.DASHBOARD_ADMIN],
+    permissions: [P.MASTER_VIEW, P.REQ_VIEW, P.REQ_VIEW_ALL, P.APPROVAL_ACT, P.ACT_ON_BEHALF, P.DASHBOARD_ADMIN, P.REPORTS_VIEW],
   },
   {
     code: 'APPROVER', name: 'Designated Requisition Approver',
@@ -114,23 +129,23 @@ export const DEFAULT_ROLES: { code: string; name: string; description: string; p
     permissions: [P.MASTER_VIEW, P.APPROVAL_ACT],
   },
   {
-    code: 'CORPORATE_HR', name: 'Corporate HR',
-    description: 'Approval sign-off, corporate remarks and quota-chart status.',
+    code: 'CORPORATE_HR', name: 'Corporate HR', active: false,
+    description: 'Legacy role. Use HR Coordinator for new users; kept so existing users are not left without a role.',
     permissions: [P.MASTER_VIEW, P.QUOTA_VIEW, P.APPROVAL_ACT, P.REQ_VIEW, P.REQ_CORPORATE_HR, P.REQ_QUOTA_CHART],
   },
   {
-    code: 'CV_SCREENER', name: 'CV Screening User',
-    description: 'Review extracted fields, screening results and candidate remarks.',
+    code: 'CV_SCREENER', name: 'CV Screening User', active: false,
+    description: 'Legacy role. Use HR Coordinator for new users; kept so existing users are not left without a role.',
     permissions: [P.VACANCY_VIEW, P.CANDIDATE_VIEW, P.CANDIDATE_EDIT, P.CV_DOWNLOAD, P.SCREENING_RUN],
   },
   {
-    code: 'EXAMINER', name: 'Interview / Examiner',
-    description: 'Attendance and exam/interview/viva marks.',
+    code: 'EXAMINER', name: 'Interview / Examiner', active: false,
+    description: 'Legacy role. Use HR Coordinator for new users; kept so existing users are not left without a role.',
     permissions: [P.VACANCY_VIEW, P.CANDIDATE_VIEW, P.CV_DOWNLOAD, P.ATTENDANCE, P.MARKS_ENTER, P.MARKS_IMPORT],
   },
   {
-    code: 'READ_ONLY', name: 'Read-only User',
-    description: 'View authorized records and reports; no create/edit/approve.',
+    code: 'READ_ONLY', name: 'Read-only User', active: false,
+    description: 'Legacy role. Use HR Coordinator for new users; kept so existing users are not left without a role.',
     permissions: [P.MASTER_VIEW, P.QUOTA_VIEW, P.REQ_VIEW, P.VACANCY_VIEW, P.CANDIDATE_VIEW, P.JOINING_VIEW, P.JOINED_VIEW, P.DASHBOARD_HR],
   },
   {

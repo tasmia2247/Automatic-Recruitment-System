@@ -6,7 +6,7 @@ import { ListQuery } from '../common/pagination';
 
 export class ApplicationListQuery extends ListQuery {
   @IsOptional() @IsIn(['Pass', 'Fail', 'Review Required']) result?: string;
-  @IsOptional() @IsIn(['cgpa', 'experience', 'name', 'institution', 'degree', 'received']) sort?: string;
+  @IsOptional() @IsIn(['score', 'cgpa', 'experience', 'name', 'institution', 'degree', 'received']) sort?: string;
   @IsOptional() @IsIn(['ASC', 'DESC']) dir?: 'ASC' | 'DESC';
   @IsOptional() @IsIn(['true', 'false']) shortlisted?: string;
   @IsOptional() @IsIn(['Pending', 'Selected', 'Not Selected', 'On Hold']) finalDecision?: string;
@@ -36,7 +36,7 @@ export class CorrectionDto {
   @IsOptional() @IsString() address?: string | null;
   @IsOptional() @IsString() certifications?: string | null;
   @IsOptional() @IsString() previousJobs?: string | null;
-  @IsOptional() @IsString() expectedSalary?: string | null;
+  @IsOptional() @IsString() @MaxLength(60, { message: 'Expected salary can be at most 60 characters.' }) expectedSalary?: string | null;
   @IsOptional() @Type(() => Number) @IsInt() @Min(14) @Max(80) age?: number | null;
 }
 

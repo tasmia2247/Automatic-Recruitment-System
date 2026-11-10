@@ -111,7 +111,7 @@ function UserEditor({ initial, user, roles, templates, matrix, departments, onCl
   const act = useAction();
   const isNew = !d.id;
   const set = (patch: Partial<Draft>) => setD({ ...d, ...patch });
-  const base = roles.filter((r) => d.roleCodes.includes(r.code) && r.active).flatMap((r) => r.permissions);
+  const base = roles.filter((r) => d.roleCodes.includes(r.code)).flatMap((r) => r.permissions);
   const effective = [...new Set([...base, ...d.extra])].filter((c) => !d.denied.includes(c));
 
   /** Copying a template makes the user's permissions exactly the template's: allow what roles lack, deny what they add. */
@@ -183,13 +183,13 @@ function UserEditor({ initial, user, roles, templates, matrix, departments, onCl
             <Field label="Department" hint="Own Department scopes use this department.">
               <Select value={d.departmentId} placeholder="None (cross-department)" onChange={(e) => set({ departmentId: e.target.value })} options={departments.map((x) => ({ value: x.id, label: x.name }))} />
             </Field>
-            <Field label="Roles" hint="Role permissions are the starting point; the Permissions tab adds or removes rights for this user only.">
+            <Field label="Roles" hint="Role permissions are the starting point; the Permissions tab adds or removes rights for this user only. Legacy roles are only shown while a user still holds them — uncheck to replace with HR Coordinator.">
               <div className="grid gap-1.5 sm:grid-cols-2">
-                {roles.map((r) => (
+                {roles.filter((r) => r.active || d.roleCodes.includes(r.code)).map((r) => (
                   <label key={r.code} className={cx('flex items-center gap-2 rounded-md border border-line px-2 py-1.5 text-sm', !r.active && 'opacity-60')}>
                     <input type="checkbox" className="accent-brand-600" checked={d.roleCodes.includes(r.code)}
                       onChange={(e) => set({ roleCodes: e.target.checked ? [...d.roleCodes, r.code] : d.roleCodes.filter((c) => c !== r.code) })} />
-                    <span>{r.name}{!r.active && ' (inactive)'}</span>
+                    <span>{r.name}{!r.active && ' (legacy)'}</span>
                     <span className="ml-auto text-[11px] text-muted">{r.permissions.length}</span>
                   </label>
                 ))}

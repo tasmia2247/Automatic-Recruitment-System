@@ -1,277 +1,295 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { EmailComposer } from '@/components/EmailComposer';
+import { MarksGrid } from '@/components/interviews/MarksGrid';
 import { MarksImportModal } from '@/components/interviews/MarksImportModal';
-import { DECISIONS, KIND_LABEL, Kind, ROUND_LABEL, Slot, dayKey, endTime, markOf, nextStep, shortDate, slotStage, slotsOf, time } from '@/components/interviews/rounds';
-import { DecisionDialog, ScheduleDialog, SlotDialog } from '@/components/interviews/SlotDialogs';
-import { Alert, Badge, Button, Card, Input, Loaded, PageHeader, Select, Stat, Table, Tabs, Td, cx, useAction, useLoad } from '@/components/ui';
-import { api } from '@/lib/api';
+import { dayKey, markOf, nextStep, shortDate, slotStage, time } from '@/components/interviews/rounds';
+import { SendToJoiningDialog } from '@/components/interviews/SendToJoiningDialog';
+import { ScheduleDialog, SlotDialog } from '@/components/interviews/SlotDialogs';
+import { Alert, Badge, Button, Card, ConfirmDialog, Input, Loaded, PageHeader, Select, Table, Td, cx, useAction, useLoad } from '@/components/ui';
+import { api, download, fmtDate } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
-const KIND_TONE: Record<Kind, string> = { MAIN: 'violet', OPTIONAL: 'orange' };
-const ATT_TONE: Record<string, string> = { Present: 'green', Absent: 'red', 'Not Recorded': 'slate' };
-const addDays = (d: Date, n: number) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
-const startOfWeek = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return addDays(x, -((x.getDay() + 1) % 7)); }; // weeks start on Saturday
-const longDay = (k: string) => new Date(`${k}T00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
-const roundsOf = (kind: Kind) => (kind === 'MAIN' ? ['WRITTEN', 'INTERVIEW'] : ['OPTIONAL']);
-const shortRound = (r: string) => ROUND_LABEL[r].replace(' (viva)', '');
-/** Nothing left to do: joined, rejected at joining, not selected, or a filled / closed vacancy (unless still waiting to join). */
-const finished = (r: any) => ['Approved', 'Rejected'].includes(r.joining?.status) || r.finalDecision === 'Not Selected'
-  || (['Filled', 'Closed'].includes(r.vacancy.status) && r.finalDecision !== 'Selected');
+type Step = 'schedule' | 'marks' | 'joining';
+type JoinView = 'decide' | 'joining' | 'waiting' | 'not' | 'all';
 
-/** Marks of a round, e.g. "Written exam 72/100", or a dash. */
-function MarkText({ row, round }: { row: any; round: string }) {
-  const m = markOf(row, round);
-  return m ? <span className="tabular-nums">{m.marks}<span className="text-muted">/{m.maxMarks ?? '—'}</span></span> : <span className="text-muted">—</span>;
-}
+/** Nothing left to do: joined, rejected at joining, or already decided out (Not Selected). A filled or closed vacancy
+ * does not by itself finish a shortlisted candidate: they may still be interviewed as backups, decided out by hand,
+ * or kept on hold. "Show finished" brings these back in view. */
+const finished = (r: any) => ['Approved', 'Rejected'].includes(r.joining?.status)
+  || r.finalDecision === 'Not Selected';
+const scheduledAt = (r: any) => slotStage(r, 'MAIN')?.scheduledAt ?? null;
+const totalOf = (r: any) => {
+  const m = ['WRITTEN', 'INTERVIEW', 'OPTIONAL'].map((x) => markOf(r, x)).filter(Boolean);
+  return m.length ? m.reduce((a: number, x: any) => a + Number(x.marks), 0) : null;
+};
+const decisionBadge = (r: any) => {
+  if (r.joining?.status === 'Approved') return <Badge tone="green">Joined</Badge>;
+  if (r.joining?.status === 'Rejected') return <Badge tone="red">Rejected at joining</Badge>;
+  if (r.finalDecision === 'Selected') return <><Badge tone="green">Sent to joining</Badge>{r.joining?.joiningDate && <div className="mt-0.5 text-[11px] text-muted">Planned {fmtDate(r.joining.joiningDate)}</div>}</>;
+  if (r.finalDecision === 'Not Selected') return <Badge tone="slate">Not selected</Badge>;
+  if (r.finalDecision === 'On Hold') return <Badge tone="amber">Waiting</Badge>;
+  return <span className="text-xs text-muted">To decide</span>;
+};
 
-function SlotCard({ slot, onOpen }: { slot: Slot; onOpen: () => void }) {
-  const { row, kind, stage } = slot;
-  return (
-    <div className="flex gap-4 rounded-lg border border-line bg-white p-3 shadow-sm">
-      <div className="w-24 shrink-0 border-r border-line pr-3 text-right">
-        <div className="text-lg font-semibold tabular-nums">{time(stage.scheduledAt)}</div>
-        {endTime(stage.scheduledAt, stage.durationMinutes) && <div className="text-xs text-muted tabular-nums">to {endTime(stage.scheduledAt, stage.durationMinutes)}</div>}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <Link className="font-semibold text-brand-700 hover:underline" href={`/applications/${row.applicationId}`}>{row.name ?? row.applicationNo}</Link>
-          <Badge tone={KIND_TONE[kind]}>{KIND_LABEL[kind]}</Badge>
-          <span className="text-xs text-muted">{row.candidateNo} · {row.applicationNo}</span>
-        </div>
-        <div className="mt-0.5 text-sm">{row.vacancy.positionTitle} <span className="text-muted">· {row.vacancy.department} · {row.vacancy.company} · {row.vacancy.vacancyNo}</span></div>
-        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted">
-          {stage.location && <span>Venue: <span className="text-ink">{stage.location}</span></span>}
-          {stage.panel && <span>Panel: <span className="text-ink">{stage.panel}</span></span>}
-          {row.phone && <span>Phone: <span className="text-ink">{row.phone}</span></span>}
-        </div>
-      </div>
-      <div className="flex shrink-0 flex-col items-end gap-1 text-xs">
-        <Badge tone={ATT_TONE[stage.attendance]}>{stage.attendance}</Badge>
-        {roundsOf(kind).map((r) => <span key={r} className="text-muted">{shortRound(r)}: <MarkText row={row} round={r} /></span>)}
-        <Button size="sm" variant="secondary" onClick={onOpen}>Manage</Button>
-      </div>
-    </div>
-  );
-}
-
-/** Interview Board (owner, 2026-11-04): shortlisted candidates' written exam & interview day, optional exam, marks and decisions. */
-export default function InterviewBoardPage() {
+/**
+ * Interview (owner, 2026-11-09): one page, three steps per vacancy, the way recruitment systems usually split it:
+ * 1 Schedule the interview day → 2 Attendance & marks (a sheet-like grid, or Excel download / upload) → 3 Select for joining
+ * (tick or select all, then Send to joining with a planned date, or Not selected). Shortlisting stays on the vacancy page.
+ */
+export default function InterviewPage() {
   const { can } = useAuth();
-  const [filters, setFilters] = useState({ departmentId: '', designation: '', vacancyId: '', kind: '', q: '' });
-  const [showFinished, setShowFinished] = useState(false);
-  // Everything in scope loads once; the filters narrow it here, so the dropdowns keep every choice and search is instant.
   const state = useLoad(() => api('/interviews/board'));
-  const [decision, setDecision] = useState<{ row: any; decision: string } | null>(null);
-  const [tab, setTab] = useState('schedule');
-  const [week, setWeek] = useState(() => startOfWeek(new Date()));
-  const [day, setDay] = useState(() => dayKey(new Date()));
-  const [open, setOpen] = useState<{ row: any; kind: Kind } | null>(null);
+  const [vacancyId, setVacancyId] = useState('');
+  const [q, setQ] = useState('');
+  // Candidates whose interview day is this date, in every step (owner, 2026-11-09).
+  const [interviewOn, setInterviewOn] = useState('');
+  const [showFinished, setShowFinished] = useState(false);
+  const [step, setStep] = useState<Step>('schedule');
+  const [joinView, setJoinView] = useState<JoinView>('decide');
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [dialog, setDialog] = useState<'' | 'schedule' | 'invite' | 'result'>('');
-  const [upload, setUpload] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<'' | 'schedule' | 'invite' | 'result' | 'joining' | 'waiting' | 'not' | 'undo' | 'upload' | 'back-screening' | 'back-schedule'>('');
+  const [slot, setSlot] = useState<any | null>(null);
   const act = useAction();
 
-  const loaded: any[] = state.data?.rows ?? [];
-  const finishedCount = loaded.filter(finished).length;
-  const all = showFinished ? loaded : loaded.filter((r) => !finished(r));
-  const needle = filters.q.trim().toLowerCase();
-  const rows = all.filter((r) => (!filters.departmentId || r.vacancy.departmentId === filters.departmentId)
-    && (!filters.vacancyId || r.vacancy.id === filters.vacancyId)
-    && (!filters.designation || r.vacancy.positionTitle === filters.designation)
-    && (!needle || [r.name, r.candidateNo, r.applicationNo, r.phone, r.email].some((x) => x?.toLowerCase().includes(needle))));
-  const slots = slotsOf(rows, filters.kind || undefined);
-  const today = dayKey(new Date());
-  const byDay = useMemo(() => slots.reduce<Record<string, Slot[]>>((m, s) => { (m[dayKey(s.stage.scheduledAt)] ??= []).push(s); return m; }, {}), [slots]);
-  const upcoming = Object.keys(byDay).filter((k) => k >= today).sort().slice(0, 14);
-  const weekDays = Array.from({ length: 7 }, (_, i) => dayKey(addDays(week, i)));
+  // Lists are rebuilt only when the data or a filter changes: the marks grid reloads its cells when its rows change, so a
+  // fresh array on every render would wipe what was just typed and saved.
+  const loaded: any[] = useMemo(() => state.data?.rows ?? [], [state.data]);
+  const active = useMemo(() => (showFinished ? loaded : loaded.filter((r) => !finished(r))), [loaded, showFinished]);
+  const vacancies = useMemo(() => {
+    const m = new Map<string, any>();
+    for (const r of active) { const v = m.get(r.vacancy.id) ?? { ...r.vacancy, count: 0 }; v.count++; m.set(r.vacancy.id, v); }
+    return [...m.values()].sort((a, b) => `${a.department} ${a.positionTitle}`.localeCompare(`${b.department} ${b.positionTitle}`));
+  }, [active]);
+  // With one vacancy in scope it is chosen by itself; a vacancy that drops out of the list clears the choice.
+  useEffect(() => {
+    if (vacancies.length === 1 && vacancyId !== vacancies[0].id) setVacancyId(vacancies[0].id);
+    else if (vacancyId && !vacancies.some((v) => v.id === vacancyId)) setVacancyId('');
+  }, [vacancies]);
+  const vacancy = vacancies.find((v) => v.id === vacancyId);
+  const needle = q.trim().toLowerCase();
+  const inView = useMemo(() => active.filter((r) => (!vacancyId || r.vacancy.id === vacancyId)
+    && (!interviewOn || (scheduledAt(r) && dayKey(scheduledAt(r)) === interviewOn))
+    && (!needle || [r.name, r.candidateNo, r.applicationNo, r.phone, r.email].some((x) => x?.toLowerCase().includes(needle)))), [active, vacancyId, interviewOn, needle]);
 
-  const departments = [...new Map(all.map((r) => [r.vacancy.departmentId, r.vacancy.department])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
-  const designations = [...new Set(all.filter((r) => !filters.departmentId || r.vacancy.departmentId === filters.departmentId).map((r) => r.vacancy.positionTitle as string))].sort();
-  const vacancies = [...new Map(all.map((r) => [r.vacancy.id, r.vacancy])).values()];
-  const uploadFor = vacancies.find((v) => v.id === filters.vacancyId);
-  // Marks can be uploaded for any vacancy with shortlisted candidates, finished ones included (late corrections).
-  const importVacancies = [...new Map(loaded.map((r) => [r.vacancy.id, r.vacancy])).values()];
+  // What each step still needs, shown on the step buttons.
+  const toSchedule = inView.filter((r) => !scheduledAt(r) && r.finalDecision === 'Pending');
+  const toMark = inView.filter((r) => scheduledAt(r) && slotStage(r, 'MAIN')?.attendance !== 'Absent' && (!markOf(r, 'WRITTEN') || !markOf(r, 'INTERVIEW')) && r.finalDecision === 'Pending');
+  const toDecide = inView.filter((r) => r.finalDecision === 'Pending');
 
-  const notScheduled = rows.filter((r) => r.shortlisted && r.finalDecision === 'Pending' && !slotStage(r, 'MAIN')?.scheduledAt).length;
-  const in7 = dayKey(addDays(new Date(), 7));
-  const awaitingMarks = slots.filter((s) => s.stage.attendance === 'Present' && roundsOf(s.kind).some((r) => !markOf(s.row, r))).length;
+  const scheduleRows = [...inView].sort((a, b) => (scheduledAt(a) ? 1 : 0) - (scheduledAt(b) ? 1 : 0) || String(scheduledAt(a) ?? '').localeCompare(String(scheduledAt(b) ?? '')) || (a.name ?? '').localeCompare(b.name ?? ''));
+  const marksRows = useMemo(() => [...inView].sort((a, b) => String(scheduledAt(a) ?? '9').localeCompare(String(scheduledAt(b) ?? '9')) || (a.name ?? '').localeCompare(b.name ?? '')), [inView]);
+  const joinRows = inView.filter((r) => joinView === 'all' || (joinView === 'decide' ? r.finalDecision === 'Pending'
+    : joinView === 'joining' ? r.finalDecision === 'Selected'
+    : joinView === 'waiting' ? r.finalDecision === 'On Hold'
+    : r.finalDecision === 'Not Selected'))
+    .sort((a, b) => (totalOf(b) ?? -1) - (totalOf(a) ?? -1) || (a.name ?? '').localeCompare(b.name ?? ''));
+  const rowsOfStep = step === 'schedule' ? scheduleRows : step === 'joining' ? joinRows : marksRows;
+  // Marks typed but not saved in step 2: leaving the step asks first.
+  const [unsaved, setUnsaved] = useState(0);
+  const goStep = (s: Step) => { if (s !== step && unsaved && !window.confirm(`${unsaved} change${unsaved === 1 ? ' is' : 's are'} not saved. Leave step 2 and drop them?`)) return; setUnsaved(0); setStep(s); };
 
-  // Candidates view: department → designation (vacancy) groups.
-  const groups = useMemo(() => {
-    const g = new Map<string, { key: string; title: string; vacancy: any; rows: any[] }>();
-    for (const r of rows) {
-      if (!g.has(r.vacancy.id)) g.set(r.vacancy.id, { key: r.vacancy.id, title: `${r.vacancy.department} · ${r.vacancy.positionTitle}`, vacancy: r.vacancy, rows: [] });
-      g.get(r.vacancy.id)!.rows.push(r);
-    }
-    return [...g.values()];
-  }, [rows]);
+  // A tick belongs to the step it was made in.
+  useEffect(() => setSelected(new Set()), [step, vacancyId, joinView, interviewOn]);
+  const chosen = loaded.filter((r) => selected.has(r.applicationId));
+  const toggle = (id: string) => setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const allTicked = rowsOfStep.length > 0 && rowsOfStep.every((r) => selected.has(r.applicationId));
+  const tickAll = () => setSelected(allTicked ? new Set() : new Set(rowsOfStep.map((r) => r.applicationId)));
+  const done = (msg: string, keep: string[] = []) => { act.setMessage(msg); setSelected(new Set(keep)); setDialog(''); state.reload(); };
 
-  const setF = (k: string, v: string) => setFilters((f) => ({ ...f, [k]: v, ...(k === 'departmentId' ? { designation: '', vacancyId: '' } : {}) }));
-  const toggle = (id: string) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const goTo = (k: string) => { setDay(k); setWeek(startOfWeek(new Date(`${k}T00:00`))); };
-
-  const slotCell = (r: any, kind: Kind) => {
-    const s = slotStage(r, kind);
-    return (
-      <button className="w-full rounded-md border border-line p-2 text-left text-xs hover:border-brand-600" onClick={() => setOpen({ row: r, kind })}>
-        {s?.scheduledAt ? (
-          <>
-            <div className="font-medium text-ink">{shortDate(s.scheduledAt)} · {time(s.scheduledAt)}{endTime(s.scheduledAt, s.durationMinutes) ? `–${endTime(s.scheduledAt, s.durationMinutes)}` : ''}</div>
-            {s.location && <div className="truncate text-muted">{s.location}</div>}
-            <div className="mt-1"><Badge tone={ATT_TONE[s.attendance]}>{s.attendance}</Badge></div>
-          </>
-        ) : <span className="text-muted">{kind === 'MAIN' ? 'Not scheduled · set' : 'Not held · set'}</span>}
-      </button>
-    );
+  /** Final decision for each ticked candidate, one by one; refused ones stay ticked. */
+  const decideAll = async (decision: 'Not Selected' | 'Pending' | 'On Hold') => {
+    const failed: string[] = [];
+    const errors: string[] = [];
+    const list = decision === 'Pending' ? decided : chosen;
+    await act.run(async () => {
+      for (const r of list) {
+        try { await api(`/applications/${r.applicationId}/final-decision`, { body: { decision } }); } catch (e: any) { failed.push(r.applicationId); errors.push(`${r.name ?? r.applicationNo}: ${e?.message}`); }
+      }
+    });
+    const verb = decision === 'Pending' ? 'moved back to To decide (decision removed)'
+      : decision === 'On Hold' ? 'moved to Waiting'
+      : 'marked Not selected';
+    done(`${list.length - failed.length} candidate${list.length - failed.length === 1 ? '' : 's'} ${verb}.`, failed);
+    if (errors.length) act.setError(`Not changed: ${errors.join(' · ')}`);
   };
+
+  /** "Remove" in step 1 or 2 (owner, 2026-11-09): back one stage; the API checks each candidate and refused ones stay ticked. */
+  const moveBack = async (to: 'schedule' | 'screening') => {
+    const r: any = await act.run(() => api('/interviews/move-back', { body: { applicationIds: chosen.map((x) => x.applicationId), to } }));
+    if (!r) return;
+    const failed = r.results.filter((x: any) => !x.ok);
+    done(`${r.moved} candidate${r.moved === 1 ? '' : 's'} moved back to ${to === 'screening' ? 'the vacancy\'s Candidates & screening' : 'step 1 (Schedule)'}.`, failed.map((x: any) => x.applicationId));
+    if (failed.length) act.setError(`Not moved: ${failed.map((x: any) => `${loaded.find((y) => y.applicationId === x.applicationId)?.name ?? ''}: ${x.error}`).join(' · ')}`);
+  };
+  const decided = chosen.filter((r) => r.finalDecision !== 'Pending');
+
+  const tickHead = <input type="checkbox" className="accent-brand-600" aria-label="Select all" checked={allTicked} disabled={!rowsOfStep.length} onChange={tickAll} />;
+  const tickCell = (r: any) => <Td><input type="checkbox" className="accent-brand-600" aria-label={`Select ${r.name ?? r.applicationNo}`} checked={selected.has(r.applicationId)} onChange={() => toggle(r.applicationId)} /></Td>;
+  const who = (r: any) => (
+    <Td><Link className="font-medium text-brand-700 hover:underline" href={`/applications/${r.applicationId}`}>{r.name ?? r.applicationNo}</Link>
+      <div className="text-xs text-muted">{r.applicationNo}{r.phone ? ` · ${r.phone}` : ''}</div></Td>
+  );
+  const vacCell = (r: any) => !vacancyId && <Td className="text-xs">{r.vacancy.positionTitle}<div className="text-muted">{r.vacancy.department} · {r.vacancy.vacancyNo}</div></Td>;
+  const markCell = (r: any, round: string) => { const m = markOf(r, round); return <Td className="text-right tabular-nums">{m ? <>{m.marks}<span className="text-muted">/{m.maxMarks ?? '—'}</span></> : <span className="text-muted">—</span>}</Td>; };
+
+  const STEPS: { key: Step; n: number; title: string; hint: string; todo: number }[] = [
+    { key: 'schedule', n: 1, title: 'Schedule', hint: 'Set the interview date & time', todo: toSchedule.length },
+    { key: 'marks', n: 2, title: 'Attendance & marks', hint: 'Type in or upload Excel', todo: toMark.length },
+    { key: 'joining', n: 3, title: 'Select for joining', hint: 'Send to joining, waiting or not selected', todo: toDecide.length },
+  ];
 
   return (
     <>
-      <PageHeader title="Interview Board"
-        subtitle={state.data ? (state.data.allVacancies ? 'Every shortlisted candidate across all vacancies and coordinators.' : 'Shortlisted candidates of the vacancies you coordinate.') : ' '} />
-      <div className="mb-3 space-y-2"><Alert>{act.error}</Alert><Alert tone="success">{act.message}</Alert></div>
+      <PageHeader title="Interview" subtitle="Shortlisted candidates, step by step: schedule the interview, enter attendance and marks, then select who goes to joining. Candidates are shortlisted on the vacancy's Candidates tab." />
 
       <Card pad={false} className="mb-4">
         <div className="flex flex-wrap items-center gap-2 p-3">
-          <Select className="max-w-[12rem]" value={filters.departmentId} placeholder="All departments" onChange={(e) => setF('departmentId', e.target.value)} options={departments.map(([id, name]) => ({ value: id, label: name }))} />
-          <Select className="max-w-[13rem]" value={filters.designation} placeholder="All designations" onChange={(e) => setF('designation', e.target.value)} options={designations.map((d) => ({ value: d, label: d }))} />
-          <Select className="max-w-[14rem]" value={filters.vacancyId} placeholder="All vacancies" onChange={(e) => setF('vacancyId', e.target.value)}
-            options={vacancies.filter((v) => (!filters.departmentId || v.departmentId === filters.departmentId) && (!filters.designation || v.positionTitle === filters.designation)).map((v) => ({ value: v.id, label: `${v.vacancyNo} · ${v.positionTitle}` }))} />
-          <Select className="max-w-[15rem]" value={filters.kind} placeholder="All exams" onChange={(e) => setF('kind', e.target.value)} options={(['MAIN', 'OPTIONAL'] as Kind[]).map((k) => ({ value: k, label: KIND_LABEL[k] }))} />
-          <Input className="max-w-[14rem]" placeholder="Name, ID or phone…" value={filters.q} onChange={(e) => setF('q', e.target.value)} aria-label="Search candidates" />
+          <Select className="max-w-md" value={vacancyId} onChange={(e) => setVacancyId(e.target.value)} placeholder={`All vacancies (${active.length} candidates)`} aria-label="Vacancy"
+            options={vacancies.map((v) => ({ value: v.id, label: `${v.department} · ${v.positionTitle} · ${v.vacancyNo} (${v.count})` }))} />
+          <Input className="max-w-[14rem]" placeholder="Search name, ID or phone…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search candidates" />
+          <label className="flex items-center gap-2 text-sm text-muted">Interview date
+            <Input type="date" className="w-44" value={interviewOn} onChange={(e) => setInterviewOn(e.target.value)} aria-label="Interview date" /></label>
+          <Button size="sm" variant={interviewOn === dayKey(new Date()) ? 'primary' : 'secondary'} onClick={() => setInterviewOn(dayKey(new Date()))}>Today</Button>
+          {interviewOn && <Button size="sm" variant="ghost" onClick={() => setInterviewOn('')}>Any date</Button>}
           <label className="ml-auto flex items-center gap-2 text-sm text-muted">
             <input type="checkbox" className="accent-brand-600" checked={showFinished} onChange={(e) => setShowFinished(e.target.checked)} />
-            Show finished ({finishedCount})
+            Show finished ({loaded.filter(finished).length})
           </label>
         </div>
-        {!showFinished && finishedCount > 0 && <p className="border-t border-line px-3 py-1.5 text-xs text-muted">Hidden: {finishedCount} finished candidate{finishedCount === 1 ? '' : 's'} (joined, rejected at joining, not selected, or of a filled / closed vacancy).</p>}
+        <div className="grid border-t border-line sm:grid-cols-3">
+          {STEPS.map((s) => (
+            <button key={s.key} onClick={() => goStep(s.key)} className={cx('flex items-center gap-3 border-line px-4 py-3 text-left sm:border-r sm:last:border-r-0', step === s.key ? 'bg-brand-50 ring-2 ring-inset ring-brand-600' : 'hover:bg-slate-50')}>
+              <span className={cx('flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold', step === s.key ? 'bg-brand-600 text-white' : 'bg-slate-100 text-ink')}>{s.n}</span>
+              <span className="min-w-0 flex-1"><span className="block font-semibold">{s.title}</span><span className="block text-xs text-muted">{s.hint}</span></span>
+              {s.todo > 0 && <Badge tone="amber">{s.todo} to do</Badge>}
+            </button>
+          ))}
+        </div>
       </Card>
 
-      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        <Stat label="Shortlisted" value={rows.filter((r) => r.shortlisted).length} tone="slate" />
-        <Stat label="Not scheduled" value={notScheduled} tone="amber" hint="No written & interview day yet" />
-        <Stat label="Today" value={byDay[today]?.length ?? 0} tone="brand" />
-        <Stat label="Next 7 days" value={slots.filter((s) => { const k = dayKey(s.stage.scheduledAt); return k >= today && k < in7; }).length} tone="violet" />
-        <Stat label="Marks pending" value={awaitingMarks} tone="amber" hint="Attended, marks not entered" />
-        <Stat label="Selected" value={rows.filter((r) => r.finalDecision === 'Selected').length} tone="green" />
-      </div>
+      <div className="mb-3 space-y-2"><Alert>{act.error}</Alert><Alert tone="success">{act.message}</Alert></div>
 
-      {can(P.MARKS_IMPORT) && (
-        <Card className="mb-4" title="Marks from Excel">
-          <div className="flex flex-wrap items-center gap-2">
-            <Button disabled={!importVacancies.length} onClick={() => setUpload('MAIN')}>Written & interview marks</Button>
-            <Button variant="secondary" disabled={!importVacancies.length} onClick={() => setUpload('OPTIONAL')}>Optional exam marks</Button>
-            <span className="text-xs text-muted">Choose the department and designation, download the template with the candidates already listed, fill in the marks and upload it. The optional exam only when it was held.</span>
-          </div>
-        </Card>
+      {selected.size > 0 && (
+        <div className="sticky top-14 z-[5] mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm shadow-sm">
+          <b>{selected.size} selected</b>
+          {step === 'schedule' && <>
+            {can(P.SHORTLIST) && <Button size="sm" onClick={() => setDialog('schedule')}>Set interview date & time</Button>}
+            {can(P.EMAIL_SEND) && <Button size="sm" variant="secondary" onClick={() => setDialog('invite')}>Email invitation</Button>}
+            {can(P.SHORTLIST) && <Button size="sm" variant="danger" onClick={() => setDialog('back-screening')}>Remove from interview</Button>}
+          </>}
+          {step === 'marks' && can(P.SHORTLIST) && <Button size="sm" variant="danger" onClick={() => setDialog('back-schedule')}>Remove (back to Schedule)</Button>}
+          {step === 'joining' && <>
+            {can(P.FINAL_DECISION) && can(P.JOINING_APPROVE) && <Button size="sm" onClick={() => setDialog('joining')}>Send to joining</Button>}
+            {can(P.FINAL_DECISION) && <Button size="sm" variant="secondary" onClick={() => setDialog('waiting')} title="Keep as backup; move to joining later if a selected candidate does not join.">Send to waiting</Button>}
+            {can(P.FINAL_DECISION) && <Button size="sm" variant="secondary" onClick={() => setDialog('not')}>Not selected</Button>}
+            {can(P.EMAIL_SEND) && <Button size="sm" variant="secondary" onClick={() => setDialog('result')}>Email result</Button>}
+            {can(P.FINAL_DECISION) && decided.length > 0 && <Button size="sm" variant="danger" onClick={() => setDialog('undo')}>Remove decision</Button>}
+          </>}
+          <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>Clear</Button>
+        </div>
       )}
 
-      <Tabs active={tab} onChange={setTab} tabs={[{ key: 'schedule', label: 'Schedule (date-wise)' }, { key: 'candidates', label: 'Candidates by department & designation' }]} />
-
-      <Loaded state={state} empty={(d: any) => (!d.rows.length ? 'No shortlisted candidates yet. Shortlist candidates from a vacancy\'s Candidates tab; they appear here.'
-        : !rows.length && (all.length ? 'No candidate matches these filters.' : `All ${finishedCount} candidates are finished. Tick "Show finished" to see them.`))}>
-        {() => tab === 'schedule' ? (
-          <div className="grid gap-4 lg:grid-cols-[1fr_18rem]">
-            <div className="space-y-3">
-              <Card pad={false}>
-                <div className="flex items-center justify-between border-b border-line px-3 py-2">
-                  <Button size="sm" variant="ghost" onClick={() => setWeek(addDays(week, -7))}>‹ Previous week</Button>
-                  <div className="text-sm font-medium">{new Date(`${weekDays[0]}T00:00`).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} – {new Date(`${weekDays[6]}T00:00`).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
-                  <div className="flex gap-1"><Button size="sm" variant="secondary" onClick={() => goTo(today)}>Today</Button><Button size="sm" variant="ghost" onClick={() => setWeek(addDays(week, 7))}>Next week ›</Button></div>
-                </div>
-                <div className="grid grid-cols-7">
-                  {weekDays.map((k) => {
-                    const d = new Date(`${k}T00:00`);
-                    const n = byDay[k]?.length ?? 0;
+      <Loaded state={state} empty={(d: any) => (!d.rows.length ? 'No shortlisted candidates yet. Shortlist candidates on a vacancy\'s Candidates tab; they appear here.'
+        : !inView.length && (interviewOn ? `No interview on ${fmtDate(interviewOn)}${vacancyId || needle ? ' for this vacancy or search' : ''}.` : active.length ? 'No candidate matches this vacancy or search.' : 'Every candidate is finished. Tick "Show finished" to see them.'))}>
+        {() => (
+          <>
+            {step === 'schedule' && (
+              <Card pad={false} title="1 · Schedule the interview" actions={<span className="text-xs text-muted">Written exam and interview board are held on the same day. Tick candidates, then Set interview date & time. Click a date to change one candidate.</span>}>
+                <Table head={[tickHead, 'Candidate', ...(!vacancyId ? ['Vacancy'] : []), 'Interview date & time', 'Venue', 'Status']}>
+                  {scheduleRows.map((r) => {
+                    const s = slotStage(r, 'MAIN');
                     return (
-                      <button key={k} onClick={() => setDay(k)} className={cx('border-r border-line px-1 py-2 text-center last:border-r-0 hover:bg-slate-50', k === day && 'bg-brand-50 ring-2 ring-inset ring-brand-600')}>
-                        <div className="text-[11px] uppercase tracking-wide text-muted">{d.toLocaleDateString('en-GB', { weekday: 'short' })}</div>
-                        <div className={cx('text-lg font-semibold tabular-nums', k === today && 'text-brand-700')}>{d.getDate()}</div>
-                        <div className={cx('mx-auto mt-0.5 w-fit rounded-full px-2 text-xs tabular-nums', n ? 'bg-brand-600 text-white' : 'text-muted')}>{n || '–'}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </Card>
-              <div className="flex items-baseline justify-between">
-                <h2 className="text-base font-semibold">{longDay(day)}</h2>
-                <span className="text-sm text-muted">{byDay[day]?.length ?? 0} candidate{byDay[day]?.length === 1 ? '' : 's'}</span>
-              </div>
-              {byDay[day]?.length
-                ? byDay[day].map((s) => <SlotCard key={`${s.row.applicationId}-${s.kind}`} slot={s} onOpen={() => setOpen({ row: s.row, kind: s.kind })} />)
-                : <div className="rounded-lg border border-dashed border-line bg-white p-6 text-center text-sm text-muted">No exams or interviews on this day.</div>}
-            </div>
-            <div className="space-y-3">
-              <Card title="Upcoming" pad={false}>
-                {upcoming.length ? upcoming.map((k) => (
-                  <button key={k} onClick={() => goTo(k)} className={cx('block w-full border-b border-line px-3 py-2 text-left last:border-b-0 hover:bg-slate-50', k === day && 'bg-brand-50')}>
-                    <div className="flex items-center justify-between text-sm font-medium"><span>{new Date(`${k}T00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short' })}</span><Badge tone="blue">{byDay[k].length}</Badge></div>
-                    <div className="mt-0.5 truncate text-xs text-muted">{[...new Set(byDay[k].map((s) => `${s.row.vacancy.department} · ${s.row.vacancy.positionTitle}`))].join('; ')}</div>
-                  </button>
-                )) : <p className="p-3 text-sm text-muted">Nothing scheduled ahead.</p>}
-              </Card>
-              {notScheduled > 0 && (
-                <Alert tone="warning">{notScheduled} shortlisted candidate{notScheduled === 1 ? ' has' : 's have'} no written & interview day yet. <button className="font-medium underline" onClick={() => setTab('candidates')}>Schedule them</button>.</Alert>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {selected.size > 0 && (
-              <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm shadow-sm">
-                <b>{selected.size} selected</b>
-                {can(P.SHORTLIST) && <Button size="sm" onClick={() => setDialog('schedule')}>Schedule / reschedule</Button>}
-                {can(P.EMAIL_SEND) && <Button size="sm" variant="secondary" onClick={() => setDialog('invite')}>Send invitation</Button>}
-                {can(P.EMAIL_SEND) && <Button size="sm" variant="secondary" onClick={() => setDialog('result')}>Send result email</Button>}
-                <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>Clear</Button>
-              </div>
-            )}
-            {groups.map((g) => (
-              <Card key={g.key} pad={false} title={<>{g.title} <span className="font-normal text-muted">· {g.vacancy.vacancyNo} · {g.vacancy.company} · {g.rows.length} candidate{g.rows.length === 1 ? '' : 's'}</span></>}>
-                <Table head={[<input key="all" type="checkbox" aria-label={`Select all of ${g.vacancy.vacancyNo}`} className="accent-brand-600" checked={g.rows.every((r) => selected.has(r.applicationId))}
-                  onChange={(e) => setSelected((s) => { const n = new Set(s); g.rows.forEach((r) => (e.target.checked ? n.add(r.applicationId) : n.delete(r.applicationId))); return n; })} />,
-                  'Candidate', 'Written & interview day', 'Written exam', 'Interview board', 'Optional exam', 'Next step', 'Final decision']}>
-                  {g.rows.map((r) => {
-                    const next = nextStep(r);
-                    return (
-                      <tr key={r.applicationId} className={cx('align-top', selected.has(r.applicationId) ? 'bg-brand-50/50' : 'hover:bg-slate-50')}>
-                        <Td><input type="checkbox" className="accent-brand-600" aria-label={`Select ${r.applicationNo}`} checked={selected.has(r.applicationId)} onChange={() => toggle(r.applicationId)} /></Td>
-                        <Td><Link className="font-medium text-brand-700 hover:underline" href={`/applications/${r.applicationId}`}>{r.name ?? r.applicationNo}</Link>
-                          <div className="text-xs text-muted">{r.applicationNo} · {r.candidateNo}</div>
-                          <div className="text-xs text-muted">{r.phone ?? ''}{r.email ? ` · ${r.email}` : ''}</div>
-                          <div className="mt-1"><Badge>{r.screeningResult ?? 'Not screened'}</Badge></div></Td>
-                        <Td className="min-w-[10rem]">{slotCell(r, 'MAIN')}</Td>
-                        {['WRITTEN', 'INTERVIEW'].map((k) => (
-                          <Td key={k} className="whitespace-nowrap text-sm"><MarkText row={r} round={k} />{r.stages[k] && r.stages[k].result !== 'Pending' && <div className="mt-1"><Badge>{r.stages[k].result}</Badge></div>}</Td>
-                        ))}
-                        <Td className="min-w-[9rem]">{slotCell(r, 'OPTIONAL')}{markOf(r, 'OPTIONAL') && <div className="mt-1 text-sm"><MarkText row={r} round="OPTIONAL" /></div>}</Td>
-                        <Td><Badge tone={next.tone}>{next.label}</Badge></Td>
-                        <Td>
-                          <Select className="w-40" value={r.finalDecision} disabled={!can(P.FINAL_DECISION) || !!r.joining && r.joining.status !== 'Pending'} onChange={(e) => setDecision({ row: r, decision: e.target.value })}
-                            options={DECISIONS.map((x) => ({ value: x, label: x }))} aria-label="Final decision" />
-                          {r.joining && <div className="mt-1 text-[11px] text-muted">Joining: {r.joining.status}</div>}
-                        </Td>
+                      <tr key={r.applicationId} className={selected.has(r.applicationId) ? 'bg-brand-50/50' : 'hover:bg-slate-50'}>
+                        {tickCell(r)}{who(r)}{vacCell(r)}
+                        <Td><button className="rounded-md border border-line px-2 py-1 text-left text-sm hover:border-brand-600" onClick={() => setSlot(r)}>
+                          {s?.scheduledAt ? <span className="whitespace-nowrap font-medium">{shortDate(s.scheduledAt)} · {time(s.scheduledAt)}</span> : <span className="text-amber-700">Not scheduled · set</span>}</button></Td>
+                        <Td className="text-xs">{s?.location ?? <span className="text-muted">—</span>}</Td>
+                        <Td><Badge tone={nextStep(r).tone}>{nextStep(r).label}</Badge></Td>
                       </tr>
                     );
                   })}
                 </Table>
               </Card>
-            ))}
-            <p className="text-xs text-muted">Every shortlisted candidate sits the written exam and the interview board on the same day; the optional exam only when it is held. Marks stay per exam; no weighted total is calculated. Selected candidates move to Joining Pending.</p>
-          </div>
+            )}
+
+            {step === 'marks' && (
+              <Card pad={false} title="2 · Attendance & marks"
+                actions={can(P.MARKS_IMPORT) && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button size="sm" variant="secondary" disabled={!vacancy} title={vacancy ? undefined : 'Choose one vacancy above'} onClick={() => act.run(() => download(`/vacancies/${vacancy.id}/marks-template?stageType=MAIN`))}>Download Excel</Button>
+                    <Button size="sm" disabled={!vacancy} title={vacancy ? undefined : 'Choose one vacancy above'} onClick={() => setDialog('upload')}>Upload Excel</Button>
+                    {!vacancy && <span className="text-xs text-muted">Choose one vacancy above to use Excel.</span>}
+                  </div>
+                )}>
+                <MarksGrid rows={marksRows} showVacancy={!vacancyId} canMarks={can(P.MARKS_ENTER)} canAttendance={can(P.ATTENDANCE)} onError={act.setError} onMessage={act.setMessage} canSalary={can(P.CANDIDATE_EDIT)}
+                  onDirtyChange={setUnsaved} selected={selected} onToggle={toggle} onToggleAll={tickAll} onSaved={state.reload} />
+              </Card>
+            )}
+
+            {step === 'joining' && (
+              <Card pad={false} title="3 · Select for joining">
+                <div className="flex flex-wrap items-center gap-1 border-b border-line px-3 py-2 text-sm">
+                  {([['decide', 'To decide'], ['joining', 'Sent to joining'], ['waiting', 'Waiting'], ['not', 'Not selected'], ['all', 'All']] as [JoinView, string][]).map(([k, label]) => (
+                    <button key={k} onClick={() => setJoinView(k)} className={cx('rounded-full px-3 py-1', joinView === k ? 'bg-brand-600 text-white' : 'hover:bg-slate-100')}>
+                      {label} <span className="tabular-nums opacity-80">({inView.filter((r) => k === 'all' || (k === 'decide' ? r.finalDecision === 'Pending' : k === 'joining' ? r.finalDecision === 'Selected' : k === 'waiting' ? r.finalDecision === 'On Hold' : r.finalDecision === 'Not Selected')).length})</span>
+                    </button>
+                  ))}
+                  <span className="ml-auto text-xs text-muted">Highest total first. Tick candidates, or Select all, then Send to joining or Waiting.</span>
+                </div>
+                <Table head={[tickHead, 'Candidate', ...(!vacancyId ? ['Vacancy'] : []), 'Attendance', 'Written', 'Interview', 'Total', 'Expected salary', 'Decision']}>
+                  {joinRows.map((r) => (
+                    <tr key={r.applicationId} className={selected.has(r.applicationId) ? 'bg-brand-50/50' : 'hover:bg-slate-50'}>
+                      {tickCell(r)}{who(r)}{vacCell(r)}
+                      <Td className="text-xs">{slotStage(r, 'MAIN')?.attendance ?? <span className="text-muted">Not scheduled</span>}</Td>
+                      {markCell(r, 'WRITTEN')}{markCell(r, 'INTERVIEW')}
+                      <Td className="text-right font-semibold tabular-nums">{totalOf(r) ?? <span className="font-normal text-muted">—</span>}</Td>
+                      <Td className="whitespace-nowrap text-sm">{r.expectedSalary ?? <span className="text-muted">—</span>}</Td>
+                      <Td>{decisionBadge(r)}</Td>
+                    </tr>
+                  ))}
+                </Table>
+                {!joinRows.length && <p className="p-4 text-sm text-muted">No candidates in this list.</p>}
+              </Card>
+            )}
+          </>
         )}
       </Loaded>
 
-      <SlotDialog row={open?.row ?? null} kind={open?.kind ?? 'MAIN'} onClose={() => setOpen(null)} onSaved={() => { act.setMessage('Saved.'); state.reload(); }} />
-      <DecisionDialog row={decision?.row ?? null} decision={decision?.decision ?? 'Pending'} onClose={() => setDecision(null)} onSaved={(m) => { act.setMessage(m); state.reload(); }} />
-      <ScheduleDialog open={dialog === 'schedule'} count={selected.size} applicationIds={[...selected]} onClose={() => setDialog('')} onSaved={(m) => { act.setMessage(m); setSelected(new Set()); state.reload(); }} />
+      <ScheduleDialog mainOnly open={dialog === 'schedule'} count={selected.size} applicationIds={[...selected]} onClose={() => setDialog('')} onSaved={(m) => done(m)} />
+      <SlotDialog row={slot} kind="MAIN" onClose={() => setSlot(null)} onSaved={() => { act.setMessage('Saved.'); state.reload(); }} />
       {(dialog === 'invite' || dialog === 'result') && (
         <EmailComposer open kind={dialog === 'invite' ? 'INTERVIEW_INVITE' : 'RESULT'} applicationIds={[...selected]} onClose={() => setDialog('')} onSent={state.reload} />
       )}
-      <MarksImportModal vacancies={importVacancies} vacancyId={uploadFor?.id} stage={upload ?? 'MAIN'} open={!!upload} onClose={() => setUpload(null)} onDone={state.reload} />
+      <SendToJoiningDialog open={dialog === 'joining'} rows={chosen} onClose={() => setDialog('')} onSaved={(m, failedIds) => done(m, failedIds)} />
+      <ConfirmDialog open={dialog === 'not' || dialog === 'undo' || dialog === 'waiting'} danger={dialog === 'not'} busy={act.busy}
+        title={dialog === 'not' ? `Mark ${chosen.length} candidate${chosen.length === 1 ? '' : 's'} as Not selected?`
+          : dialog === 'waiting' ? `Move ${chosen.length} candidate${chosen.length === 1 ? '' : 's'} to waiting?`
+          : `Remove the decision of ${decided.length} candidate${decided.length === 1 ? '' : 's'}?`}
+        confirmLabel={dialog === 'not' ? 'Not selected' : dialog === 'waiting' ? 'Send to waiting' : 'Remove decision'}
+        message={<div className="space-y-2">
+          <p>{chosen.map((r) => r.name ?? r.applicationNo).join(', ')}</p>
+          {dialog === 'waiting' && <Alert tone="info">Kept as a backup. If a selected candidate does not join, you can move someone from Waiting to Joining later.</Alert>}
+          {chosen.some((r) => r.finalDecision === 'Selected' && r.joining?.status === 'Pending') && <Alert tone="warning">Some of them are waiting in Joining Pending; they leave it, with their planned joining date.</Alert>}
+          {chosen.some((r) => r.joining?.status === 'Approved') && <Alert tone="info">Candidates who already joined cannot be changed and are skipped.</Alert>}
+        </div>}
+        onConfirm={() => decideAll(dialog === 'not' ? 'Not Selected' : dialog === 'waiting' ? 'On Hold' : 'Pending')} onClose={() => setDialog('')} />
+      <ConfirmDialog open={dialog === 'back-screening' || dialog === 'back-schedule'} danger busy={act.busy}
+        title={dialog === 'back-screening' ? `Remove ${chosen.length} candidate${chosen.length === 1 ? '' : 's'} from the interview?` : `Move ${chosen.length} candidate${chosen.length === 1 ? '' : 's'} back to Schedule?`}
+        confirmLabel={dialog === 'back-screening' ? 'Remove from interview' : 'Move back'}
+        message={<div className="space-y-2">
+          <p>{chosen.map((r) => r.name ?? r.applicationNo).join(', ')}</p>
+          <p>{dialog === 'back-screening'
+            ? 'They go back to the vacancy\'s Candidates & screening (no longer shortlisted) and leave the Interview page. Their interview date, attendance and any marks are cleared.'
+            : 'They go back to step 1 (Schedule): their interview date, attendance and marks are cleared, so they can be scheduled again.'}</p>
+          {chosen.some((r) => r.marks.length) && <Alert tone="warning">Marks already entered for {chosen.filter((r) => r.marks.length).map((r) => r.name ?? r.applicationNo).join(', ')} will be removed. The Logs keep a copy.</Alert>}
+          {decided.length > 0 && <Alert tone="info">Candidates with a final decision are skipped; remove their decision in step 3 first.</Alert>}
+        </div>}
+        onConfirm={() => moveBack(dialog === 'back-screening' ? 'screening' : 'schedule')} onClose={() => setDialog('')} />
+      {vacancy && <MarksImportModal fixed vacancies={[{ id: vacancy.id, vacancyNo: vacancy.vacancyNo, positionTitle: vacancy.positionTitle, department: vacancy.department, departmentId: vacancy.departmentId, status: vacancy.status }]}
+        vacancyId={vacancy.id} stage="MAIN" open={dialog === 'upload'} onClose={() => setDialog('')} onDone={state.reload} />}
     </>
   );
 }

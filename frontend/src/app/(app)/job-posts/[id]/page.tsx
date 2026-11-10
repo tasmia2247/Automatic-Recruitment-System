@@ -1,10 +1,11 @@
 'use client';
 
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { Alert, Badge, Button, Card, ConfirmDialog, Field, Input, Loaded, PageHeader, Select, Textarea, useAction, useLoad } from '@/components/ui';
 import { api, download } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
+import { JobPostDeleteNote } from '@/components/vacancy/JobPostDeleteNote';
 
 const LABELS: Record<string, string> = { education: 'Education', experienceRequirement: 'Experience', duties: 'Key responsibilities', skills: 'Required skills' };
 const FILLED_LABEL = (keys: string[]) => keys.map((k) => LABELS[k] ?? k).join(', ');
@@ -12,6 +13,7 @@ const FILLED_LABEL = (keys: string[]) => keys.map((k) => LABELS[k] ?? k).join(',
 export default function JobPostPage() {
   const { id } = useParams<{ id: string }>();
   const { can } = useAuth();
+  const router = useRouter();
   const state = useLoad(() => api(`/job-posts/${id}`), [id]);
   const [form, setForm] = useState<any>(null);
   const [statusDialog, setStatusDialog] = useState<string | null>(null);
@@ -36,6 +38,11 @@ export default function JobPostPage() {
   const savePost = () => act.run(() => api(`/job-posts/${id}`, { method: 'PUT', body: { ...form, startDate: form.startDate || null, deadline: form.deadline || null, minCgpa: form.minCgpa === '' ? null : Number(form.minCgpa), applyEmail: form.applyEmail || null } }), 'Job post saved. The circular below uses the saved details.').then(state.reload);
   const copyText = async () => { await navigator.clipboard.writeText(circularText ?? ''); setCopied(true); setTimeout(() => setCopied(false), 1500); };
   const setStatus = async (status: string) => { const r = await act.run(() => api(`/job-posts/${id}/status`, { body: { status } }), `Job post ${status.toLowerCase()}.`); setStatusDialog(null); if (r) state.reload(); };
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const deletePost = async () => {
+    const r: any = await act.run(() => api(`/job-posts/${id}`, { method: 'DELETE' }));
+    if (r) router.push(`/vacancies/${r.vacancyId}`);
+  };
   const uploadCircular = async (file: File) => { const fd = new FormData(); fd.append('file', file); await act.run(() => api(`/job-posts/${id}/circular`, { form: fd }), 'Circular attached.'); state.reload(); };
 
   return (
@@ -53,6 +60,8 @@ export default function JobPostPage() {
               {j.status === 'Published' && <Button variant="secondary" onClick={() => setStatusDialog('Closed')}>Close post</Button>}
               {j.status === 'Closed' && <Button variant="secondary" onClick={() => setStatus('Published')}>Re-open</Button>}
               {['Draft', 'Published'].includes(j.status) && <Button variant="danger" onClick={() => setStatusDialog('Cancelled')}>Cancel post</Button>}
+              {/* Vacancy coordinator, HR Manager, Super Admin (owner, 2026-11-08); the API checks the scope. */}
+              <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>
               </>}
             </>} />
           <div className="mb-4 space-y-2"><Alert>{act.error}</Alert><Alert tone="success">{act.message}</Alert>
@@ -106,6 +115,8 @@ export default function JobPostPage() {
           <ConfirmDialog open={!!statusDialog} title={`${statusDialog === 'Cancelled' ? 'Cancel' : 'Close'} job post`} danger={statusDialog === 'Cancelled'} confirmLabel="Confirm" busy={act.busy} error={act.error}
             message={statusDialog === 'Cancelled' ? 'A cancelled job post cannot be re-opened.' : 'Closing stops it from being the active circular. It can be re-opened.'}
             onConfirm={() => setStatus(statusDialog!)} onClose={() => setStatusDialog(null)} />
+          <ConfirmDialog open={confirmDelete} title={`Delete ${j.jobNo}?`} danger confirmLabel="Delete permanently" busy={act.busy} error={act.error}
+            message={<JobPostDeleteNote />} onConfirm={deletePost} onClose={() => setConfirmDelete(false)} />
         </>
       )}
     </Loaded>

@@ -25,6 +25,14 @@ function List() {
   const [direct, setDirect] = useState<any | null>(null);
   const act = useAction();
   const listAct = useAction();
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const changeStatus = async (v: any, next: string) => {
+    if (next === v.status) return;
+    setBusyId(v.id);
+    const r = await listAct.run(() => api(`/vacancies/${v.id}`, { method: 'PUT', body: { status: next } }), `${v.vacancyNo} is now ${next}.`);
+    setBusyId(null);
+    if (r) state.reload();
+  };
 
   const createDirect = async () => {
     const r = await act.run(() => api('/vacancies/direct', { body: { ...direct, ...specPayload(direct), headcount: Number(direct.headcount), positionId: direct.positionId || undefined, coordinatorId: direct.coordinatorId || undefined } }));
@@ -35,7 +43,7 @@ function List() {
     <>
       <PageHeader title="Vacancies" subtitle={can(P.RECRUITMENT_ALL) ? "Department → position/vacancy → recruitment stage → candidates." : "The vacancies you are coordinator of. The HR Manager assigns coordinators in the HR Approved Queue."}
         actions={can(P.VACANCY_DIRECT) && <Button variant="secondary" onClick={() => setDirect({ vacancyType: 'NEW', headcount: 1 })}>Direct HR vacancy</Button>} />
-      <div className="mb-3 empty:hidden"><Alert>{listAct.error}</Alert></div>
+      <div className="mb-3 space-y-2 empty:hidden"><Alert>{listAct.error}</Alert><Alert tone="success">{listAct.message}</Alert></div>
       <Card pad={false}>
         <div className="flex flex-wrap gap-3 border-b border-line p-3">
           <Input className="max-w-xs" placeholder="Search ID or position…" value={q} onChange={(e) => { setQ(e.target.value); setPage(1); }} />
@@ -62,7 +70,10 @@ function List() {
                     <Td className="text-xs">{can(P.COORDINATOR_ASSIGN) && coordinators.data
                       ? <CoordinatorSelect key={`${v.id}-${v.coordinator?.id ?? ''}`} path={`/vacancies/${v.id}/coordinator`} value={v.coordinator} options={coordinators.data} onError={listAct.setError} onSaved={() => listAct.setError(null)} />
                       : v.coordinator?.name ?? <Badge tone="amber">Unassigned</Badge>}</Td>
-                    <Td><Badge>{v.status}</Badge></Td>
+                    {/* Status can be changed from the list (owner, 2026-11-08); the API checks vacancy.edit and the coordinator scope. */}
+                    <Td>{can(P.VACANCY_EDIT)
+                      ? <Select className="min-w-[8.5rem]" aria-label={`Status of ${v.vacancyNo}`} value={v.status} disabled={busyId === v.id} onChange={(e) => changeStatus(v, e.target.value)} options={STATUSES.map((s) => ({ value: s, label: s }))} />
+                      : <Badge>{v.status}</Badge>}</Td>
                     <Td className="whitespace-nowrap">{fmtDate(v.createdAt)}</Td>
                   </tr>
                 ))}

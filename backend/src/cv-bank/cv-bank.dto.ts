@@ -1,5 +1,5 @@
 import {
-  IsDateString, IsIn, IsOptional, IsString, IsUUID, MaxLength,
+  ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsDateString, IsIn, IsOptional, IsString, IsUUID, MaxLength,
 } from 'class-validator';
 import { ListQuery } from '../common/pagination';
 
@@ -28,4 +28,10 @@ export class StatusChangeDto {
   @IsOptional() @IsDateString() joiningDate?: string;
   @IsOptional() @IsDateString() scheduledAt?: string;
   @IsOptional() @IsString() @MaxLength(200) location?: string;
+}
+
+export class BulkDeleteDto {
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(500) @ArrayUnique() @IsUUID('all', { each: true })
+  ids: string[];
+  @IsOptional() @IsString() @MaxLength(2000) reason?: string;
 }

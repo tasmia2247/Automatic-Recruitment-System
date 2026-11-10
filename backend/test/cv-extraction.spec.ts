@@ -1,4 +1,4 @@
-import { extractFromText } from '../src/candidates/cv-extractor';
+import { extractFromText, readCv } from '../src/candidates/cv-extractor';
 import { layoutPdf, PdfItem } from '../src/candidates/pdf-layout';
 
 // Made-up people in the layouts of real CVs that came in (Bdjobs export, two-column designs, labelled HR CVs).
@@ -73,7 +73,7 @@ describe('CV extraction: Bdjobs export', () => {
     expect(ex.totalExperienceYears).toBe(19.9); // the stated total, not "over 11 years" in the summary
     expect(ex.lastPosition).toBe('Deputy Manager');
     expect(ex.workplace).toBe('Delta Textile (BD) Ltd.');
-    expect(ex.previousJobs).toBe('Deputy Manager, Delta Textile (BD) Ltd.\nSupervisor To In-charge, Echo Washing Plant');
+    expect(ex.previousJobs).toBe('Deputy Manager, Delta Textile (BD) Ltd. (5 Oct 2017 – Continuing)\nSupervisor To In-charge, Echo Washing Plant (10 Oct 2010 – 21 Sep 2017)');
   });
 
   it('reads the highest finished degree with its own subject, institute and CGPA', () => {
@@ -118,7 +118,7 @@ describe('CV extraction: designed CVs', () => {
       skills: 'Microsoft Office, Time Management',
       certifications: 'Firefighting, Fire Prevention, Rescue and First Aider Training.; Social Compliance & Environmental Management (SICIP-BGMEA)',
     });
-    expect(ex.previousJobs).toBe('Administrative Officer, Creative Wash Ltd - 01 (Ha-Meem Group)\nAdministrative Officer, Denitex Wash Ltd (Armana Group)');
+    expect(ex.previousJobs).toBe('Administrative Officer, Creative Wash Ltd - 01 (Ha-Meem Group) (2022 – Till Now)\nAdministrative Officer, Denitex Wash Ltd (Armana Group) (2021 – 2022)');
   });
 
   it('reads letter-spaced headings, "Company | Title" jobs and an institute written above the degree', () => {
@@ -136,7 +136,7 @@ describe('CV extraction: designed CVs', () => {
       institution: 'SHANTO-MARIAM UNIVERSITY OF CREATIVE TECHNOLOGY',
       lastPosition: 'SR MANAGER | DESIGN & PD', workplace: 'LANTABUR GROUP',
     });
-    expect(ex.previousJobs).toBe('SR MANAGER | DESIGN & PD, LANTABUR GROUP\nMANAGER | DESIGN & PD, BEXIMCO');
+    expect(ex.previousJobs).toBe('SR MANAGER | DESIGN & PD, LANTABUR GROUP (2025 – Present)\nMANAGER | DESIGN & PD, BEXIMCO (2017 – 2024)');
   });
 
   it('reads labelled job blocks and a degree written before its education heading', () => {
@@ -158,7 +158,7 @@ describe('CV extraction: designed CVs', () => {
       degree: 'MBA (Human Resource Management)', specialization: 'Human Resource Management', institution: 'University of South Asia, Bangladesh',
       cgpa: 3.5, age: 45,
     });
-    expect(ex.previousJobs).toBe('AGM (HR, Admin & Compliance), EDISON GROUP (Garments Manufacturer)\nAssistant Manager (HR & Compliance), Shore to Shore Bangladesh Ltd.');
+    expect(ex.previousJobs).toBe('AGM (HR, Admin & Compliance), EDISON GROUP (Garments Manufacturer) (February 18, 2023 – Continuing)\nAssistant Manager (HR & Compliance), Shore to Shore Bangladesh Ltd. (2009 – 2010)');
   });
 
   it('counts a running bachelor when nothing higher is finished', () => {
@@ -213,5 +213,178 @@ describe('PDF layout', () => {
     ]);
     const ex = extractFromText(lay.text);
     expect(ex).toMatchObject({ degree: 'Bachelor of Arts (BA)', specialization: 'History', institution: 'Modhupur Adorsho College' });
+  });
+
+  it('keeps "Exam" / "Title" and "Pass" / "Year" header labels written on two lines as columns of their own (Bdjobs export)', () => {
+    const items = [
+      item('Academic Qualification:', 10, 818, 13, 172),
+      item('Exam', 20, 789, 12, 37), item('Pass', 458, 789, 12, 31),
+      item('Concentration/Major', 65, 782, 12, 141), item('Institute', 229, 782, 12, 59), item('Result', 356, 782, 12, 42), item('Duration', 502, 782, 12, 59),
+      item('Title', 24, 775, 12, 30), item('Year', 458, 775, 12, 31),
+      // row 1
+      item('Northfield', 230, 755, 12, 55), item('Second Class, Marks', 315, 755, 12, 124),
+      item('M.B.S', 17, 747.5, 12, 35), item('Accounting', 99, 747.5, 12, 66), item('2006', 454, 747.5, 12, 30), item('2', 524, 747.5, 12, 8),
+      item('University', 224, 740, 12, 60), item(':45%', 356, 740, 12, 34),
+      // row 2
+      item('B.', 32, 720, 12, 13), item('Northfield', 230, 720, 12, 55), item('Second Class, Marks', 315, 720, 12, 124),
+      item('Pass Course', 100, 713, 12, 73), item('2000', 454, 713, 12, 30), item('2', 524, 713, 12, 8),
+      item('Com', 21, 706, 12, 27), item('University', 224, 706, 12, 60), item(':49%', 356, 706, 12, 34),
+      item('Professional Qualification:', 10, 640, 13, 172),
+    ];
+    const lay = layoutPdf([{ width: 595, height: 842, items }]);
+    const rows = lay.text.split('\n').filter((l) => l.startsWith('Exam Title:'));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain('Pass Year: 2006');
+    const ex = extractFromText(lay.text);
+    expect(ex).toMatchObject({ degree: 'M.B.S', specialization: 'Accounting', institution: 'Northfield University' });
+    expect(ex.education).toContain('B. Com');
+  });
+});
+
+// Layouts met in the owner's sample CV folders (2026-11-08), with made-up people.
+describe('CV extraction: layouts from the sample CV bank', () => {
+  it('reads Word-symbol bullets, an empty education heading beside a certificate column, and companies over "Designation:"', () => {
+    const ex = extractFromText([
+      'CAREER SUMMARY', 'HR professional with over 8', 'years of experience in Talent Acquisition.',
+      'CONTACT', 'Luxmipura, Joydebpur, Gazipur.', '01700-000001', 'rafiq.hasan@example.com',
+      'SKILLS:', ' HR Operations', ' Performance Management (KPI/PMS)',
+      'Rafiq Hasan',
+      'WORK EXPERIENCES', 'ALPHA KNIT INDUSTRIES LTD. (ALPHA GROUP)', 'Designation: Asst. Manager- HRD & OD', 'Duration: 01 Feb 2024 –Till Date',
+      ' Lead end-to-end talent acquisition.',
+      'BETA APPARELS LTD. (BETA GROUP)', 'Designation: Sr. Executive- HR & Compliance', 'Duration: 01 April 2022 –22 Jan 2024',
+      'EDUCATIONAL QUALIFICATION', 'CERTIFICATIONS',
+      ' Certified KPI Professional\t PGDHRM under AIUB 2025, CGPA- 3.41',
+      ' Payroll Management Master class\t MBA in Management -2018, CGPA- 2.94',
+      ' KPI based Performance Appraisal\t BBA in Management -2017, CGPA- 2.91',
+    ].join('\n'), { today: TODAY, nameHint: 'Rafiq Hasan' }); // the PDF prints the name biggest
+    expect(ex).toMatchObject({ degree: 'MBA in Management', specialization: 'Management', cgpa: 2.94, lastPosition: 'Asst. Manager- HRD & OD', workplace: 'ALPHA KNIT INDUSTRIES LTD. (ALPHA GROUP)' });
+    expect(ex.skills).toBe('HR Operations, Performance Management (KPI/PMS)');
+    expect(ex.certifications).toBe('Certified KPI Professional; Payroll Management Master class; KPI based Performance Appraisal');
+    expect(ex.previousJobs).toContain('Sr. Executive- HR & Compliance, BETA APPARELS LTD. (BETA GROUP)');
+  });
+
+  it('reads "Resume of" names, a degree with its year, a Contact: address and education in sentences', () => {
+    const ex = extractFromText([
+      'Resume of Karim Uddin', 'CONTACT:\tHouse 14, Road 06, Rupnagar R/A, Mirpur,', 'Dhaka.', 'karim.uddin@example.com', '01900000002',
+      'Job Experience:',
+      'Assistant Manager (HR & Administration), Gamma International Company Limited\tMay’25 to till now',
+      '• Lead HR & Administration operations for 275+ employees.',
+      'Academic Qualification:',
+      '• MBA in Human Resource Management from Delta University with CGPA 2.74 out of 4 in 2019.',
+      '• BBA in Marketing from Epsilon International University, Bangladesh, with CGPA 3.43 out of 4 in 2017.',
+      'EDUCATION', 'Masters of Laws (LL.M) 2019', 'Zeta University of Professionals', 'CGPA: 2.96',
+    ].join('\n'), { nameHint: 'Resume of Karim Uddin' });
+    expect(ex).toMatchObject({ name: 'Karim Uddin', address: 'House 14, Road 06, Rupnagar R/A, Mirpur, Dhaka.' });
+    expect(ex.education).toContain('MBA in Human Resource Management - Delta University (CGPA 2.74 out of 4, 2019)');
+    expect(ex.education).toContain('Masters of Laws (LL.M) - Zeta University of Professionals');
+    expect(ex).toMatchObject({ lastPosition: 'Assistant Manager | HR & Administration', workplace: 'Gamma International Company Limited' });
+  });
+
+  it('reads labelled education, "Position Held" and a name with a nickname', () => {
+    const ex = extractFromText([
+      'Resume', 'Of', 'Nasrin Akter (Jyoti)', 'House 10, Tolarbagh, Mirpur-1', 'nasrin@example.com', '+88 - 01777 000003',
+      'Experiences:', 'Organization Name : Theta Footwear Ltd', 'Position Held : Deputy Manager (Design & Development)', 'Duration : 17 December 2023 to till date',
+      'Educational Background:', 'Masters in Clothing & Textile, 2015', 'Name of the University : Iota Home Economics Collage', 'Subject : Clothing & Textile', 'Result : First Division',
+      'B.Sc. Honors in Fashion Design, 2011', 'Name of the University : Kappa Women\'s College', 'Subject : Fashion Design', 'Result : 3.43 on a scale of 4.00',
+    ].join('\n'));
+    expect(ex).toMatchObject({ name: 'Nasrin Akter', degree: 'Masters in Clothing & Textile', institution: 'Iota Home Economics Collage', lastPosition: 'Deputy Manager (Design & Development)', workplace: 'Theta Footwear Ltd' });
+    expect(ex.education).toContain("B.Sc. Honors in Fashion Design - Kappa Women's College (3.43 on a scale of 4.00, 2011)");
+  });
+
+  it('does not take "MS Office" for a master\'s, and a degree "In progress" does not replace a finished one', () => {
+    const ex = extractFromText([
+      'Lamia Sultana', 'ACADEMIC BACKGROUND',
+      'Masters of Business Administration (MBA.)', 'Lambda University.', 'Major: Apparel Merchandising & Fashion Management.', 'Passing Year: 2025-2026 Running', 'Result: In progress',
+      'Bachelor of Science (B.Sc. Hons.)', 'Mu Institute of Science & Technology', 'Major: Apparel Manufacturing & Technology.', 'Passing Year: 2021', 'Result: CGPA 3.01',
+      'SOFTWARE SKILLS', '95%\t95%', 'MS Office', 'Outlook Mail',
+    ].join('\n'));
+    expect(ex).toMatchObject({ degree: 'Bachelor of Science (B.Sc. Hons.)', specialization: 'Apparel Manufacturing & Technology', cgpa: 3.01, skills: 'MS Office, Outlook Mail' });
+  });
+
+  it('reads a title and company written above the dates, and keeps "Key Responsibilities:" inside the job', () => {
+    const ex = extractFromText([
+      'Selina Haque', 'PROFESSIONAL WORK EXPERIENCE',
+      '1. Nu Group (Xi Stitch Design Ltd.)\tSavar, Dhaka', 'Sr. Manager‐Admin, HR & Compliance\tJune 2026 ‐ Present', 'Key Responsibilities:', 'Oversee HR and compliance.',
+      '2. Omicron Group\tGazipur', 'Sr. Manager – Admin, HR & Compliance\tMarch 2023‐ May 26', 'Key Achievements:', ' Maintained 100% compliance.',
+      'PROFESSIONAL EXPERIENCE', 'Senior Executive – Finance & Accounts | Pi Corporation Pvt. Ltd.', 'July 2023 – Present', ' Manage Accounts Payable',
+    ].join('\n'));
+    expect(ex).toMatchObject({ lastPosition: 'Sr. Manager‐Admin | HR & Compliance', workplace: 'Nu Group (Xi Stitch Design Ltd.)' });
+    expect(ex.previousJobs!.split('\n')).toEqual([
+      'Sr. Manager‐Admin | HR & Compliance, Nu Group (Xi Stitch Design Ltd.) (June 2026 – Present)', 'Sr. Manager – Admin | HR & Compliance, Omicron Group (March 2023 – May 26)',
+      'Senior Executive – Finance & Accounts, Pi Corporation Pvt. Ltd. (July 2023 – Present)',
+    ]);
+  });
+});
+
+describe('CV extraction: dates, experience, age and contact', () => {
+  it('keeps each job\'s dates and adds up the years when the CV states no total (overlaps once, internships not counted)', () => {
+    const ex = extractFromText([
+      'Tania Rahman', 'tania@example.com', '01711000004', 'WORK EXPERIENCE',
+      'Senior Officer | Rho Textiles Ltd.\tJan 2020 – Present',
+      'Officer | Sigma Apparels Ltd.\tJan 2018 – Jun 2020',
+      'Intern | Tau Bank Ltd.\tJan 2017 – Jun 2017',
+    ].join('\n'), { today: TODAY });
+    expect(ex.previousJobs!.split('\n')[0]).toBe('Senior Officer, Rho Textiles Ltd. (Jan 2020 – Present)');
+    expect(ex.totalExperienceYears).toBe(8.9); // Jan 2018 to Nov 2026 (both months counted), the overlap once
+    // A stated total wins over the dates.
+    expect(extractFromText(['Tania Rahman', 'Total experience: 5 years', 'WORK EXPERIENCE', 'Officer | Rho Textiles Ltd.\tJan 2010 – Present'].join('\n'), { today: TODAY }).totalExperienceYears).toBe(5);
+  });
+
+  it('works out the age from a month-and-year birth date, and reads a foreign mobile number', () => {
+    const ex = extractFromText(['Upal Das', 'Dubai – UAE ◇ +971545856049 ◇ upal@example.com', 'Personal Information', 'Date of Birth\t: Aug 1990'].join('\n'), { today: TODAY });
+    expect(ex).toMatchObject({ age: 36, phone: '+971545856049' });
+  });
+
+  it('reads an address in any district (Patuakhali, Moulvibazar ...)', () => {
+    const ex = extractFromText(['CONTACT', '+8801630-000005', 'Town Kalikapur, Patuakhali Sadar,', 'Patuakhali-8600', 'robin@example.com'].join('\n'));
+    expect(ex.address).toBe('Town Kalikapur, Patuakhali Sadar, Patuakhali-8600');
+  });
+});
+
+describe('CV reading', () => {
+  it('refuses text whose fonts carry no character map instead of extracting nothing from it', async () => {
+    const junk = `JOHN DOE\n${'\u001f\u001e\u001d\u001c\u001b '.repeat(200)}`;
+    await expect(readCv(Buffer.from(junk), 'cv.txt')).rejects.toThrow(/cannot be read/);
+    await expect(readCv(Buffer.from('JOHN DOE\nBSc in CSE'), 'cv.txt')).resolves.toMatchObject({ text: 'JOHN DOE\nBSc in CSE' });
+  });
+});
+
+describe('Word .doc CVs (owner, 2026-11-09)', () => {
+  const { docKind } = require('../src/common/file-kind');
+  const { validateUpload } = require('../src/common/services');
+  const upload = (name: string, buffer: Buffer) => ({ originalname: name, size: buffer.length, buffer }) as any;
+
+  it('tells what a .doc really is, and refuses anything else at upload', () => {
+    const ole = Buffer.concat([Buffer.from('d0cf11e0a1b11ae1', 'hex'), Buffer.alloc(504)]);
+    expect(docKind(ole)).toBe('ole');
+    expect(docKind(Buffer.from('PK\u0003\u0004rest'))).toBe('docx');
+    expect(docKind(Buffer.from(String.raw`{\rtf1\ansi hello}`))).toBe('rtf');
+    expect(docKind(Buffer.from('<html><body>x</body></html>'))).toBe('html');
+    expect(docKind(Buffer.from('MIME-Version: 1.0\r\nContent-Type: multipart/related'))).toBe('html');
+    expect(validateUpload(upload('cv.doc', ole))).toBeNull();
+    expect(validateUpload(upload('cv.doc', Buffer.from('MZ\u0090\u0000 a renamed program')))).toMatch(/not a valid Word \.doc/);
+  });
+
+  it('reads an RTF saved as .doc', async () => {
+    const rtf = String.raw`{\rtf1\ansi{\fonttbl{\f0 Arial;}}{\*\generator Word;}\f0 Karim Hasan\par Email: karim.hasan@example.com\par Mobile: 01811-222333\par EDUCATION\par B.Sc in CSE, University of Dhaka, 2018\par Caf\'e9 \u8211? work}`;
+    const t = await readCv(Buffer.from(rtf, 'latin1'), 'karim.doc');
+    expect(t.text).toContain('Karim Hasan\nEmail: karim.hasan@example.com');
+    expect(t.text).not.toMatch(/Arial|Word;|fonttbl/);
+    expect(t.text).toContain('Café – work');
+    expect(extractFromText(t.text)).toMatchObject({ name: 'Karim Hasan', email: 'karim.hasan@example.com' });
+  });
+
+  it('reads a web page saved as .doc (job-site downloads)', async () => {
+    const html = '<html><head><style>p{}</style></head><body><p><b>SADIA AKTER</b></p><p>E-mail: sadia.akter@example.com</p><p>Mobile: 01999-888777</p><table><tr><td>Exam Title</td><td>Institute</td></tr><tr><td>BSc in Computer Science</td><td>BRAC University</td></tr></table></body></html>';
+    const t = await readCv(Buffer.from(html), 'sadia.doc');
+    expect(t.text).not.toContain('<');
+    expect(extractFromText(t.text)).toMatchObject({ email: 'sadia.akter@example.com' });
+    expect(extractFromText(t.text).name).toMatch(/sadia akter/i);
+  });
+
+  it('takes the name from the closing signature when the top has none ("Self Profile" is a heading)', () => {
+    const ex = extractFromText(['Self Profile', 'A hard working person.', 'OBJECTIVE', 'To contribute to a dynamic team.', 'EDUCATION', 'B.Sc in Textile Engineering, BUET, 2004',
+      'Email: rafi@example.com', 'Thanking You', 'Rafiq Hossain ( Rafi )'].join('\n'));
+    expect(ex.name).toBe('Rafiq Hossain');
   });
 });

@@ -130,7 +130,7 @@ describe('CV fields for the CV data Excel', () => {
 
   it('reads "Title at Company" lines under the experience heading', () => {
     const ex = extractFromText('Rafi Ahmed\nEmployment History\nSoftware Engineer at Delta Soft Ltd. (2021 - 2024)\nJunior Developer at Echo IT, 2019-2021\nSkills: Java\n');
-    expect(ex.previousJobs).toBe('Software Engineer, Delta Soft Ltd.\nJunior Developer, Echo IT');
+    expect(ex.previousJobs).toBe('Software Engineer, Delta Soft Ltd. (2021 – 2024)\nJunior Developer, Echo IT (2019 – 2021)');
   });
 });
 
@@ -211,9 +211,9 @@ describe('screening against the "Specialization required" fields', () => {
   const cv = { degree: 'Bachelor of Science (BSc)', specialization: 'Textile Engineering', education: 'Bachelor of Science (BSc), Textile Engineering - University of South Asia; HSC, Science - BCIC College', totalExperienceYears: 4, cvText: 'Skills: AutoCAD, MS Excel. Worked in a knit composite factory.' };
   const run = (r: Parameters<typeof requirementCriteria>[0], input: Record<string, unknown> = cv) => screen(requirementCriteria(r), input as any);
 
-  it('builds one criterion per field, skills one by one, other requirements as before', () => {
+  it('builds the must-have criteria: education, experience and other requirements (skills go into the match score)', () => {
     expect(requirementCriteria({ requiredEducation: 'BSc in Textile Engineering\nDiploma in Textile', requiredSkills: 'AutoCAD, MS Excel', requiredExperienceYears: 3, specialization: 'Knit' }).map((c) => c.label))
-      .toEqual(['Education: BSc in Textile Engineering or Diploma in Textile', 'Experience: at least 3 years', 'Skill: AutoCAD', 'Skill: MS Excel', 'Knit']);
+      .toEqual(['Education: BSc in Textile Engineering or Diploma in Textile', 'Experience: at least 3 years', 'Knit']);
     expect(requirementCriteria({})).toEqual([]);
   });
 
@@ -228,12 +228,39 @@ describe('screening against the "Specialization required" fields', () => {
     const masters = run({ requiredEducation: 'MBA in HRM' });
     expect(masters.overall).toBe('Review Required');
     expect(masters.results[0].reason).toBe('Education: needs MBA in HRM; a lower degree in CV (Bachelor of Science (BSc)) - needs manual verification.');
-    expect(run({ requiredEducation: 'BSc in Computer Science' }).results[0].reason).toMatch(/Computer Science not found in CV/);
-    expect(run({ requiredEducation: 'BBA in Marketing' }).results[0].reason).toMatch(/BBA not found in CV/); // same level, another degree
+    expect(run({ requiredEducation: 'BSc in Computer Science' }).results[0].reason).toMatch(/no BSc in Computer Science in the CV's education/);
+    expect(run({ requiredEducation: 'BBA in Marketing' }).results[0].reason).toMatch(/no BBA in Marketing in the CV's education/); // same level, another degree
     const years = run({ requiredExperienceYears: 5 });
     expect(years).toMatchObject({ overall: 'Review Required', results: [{ outcome: 'Missing', reason: 'Experience: at least 5 years: CV shows 4 years - needs review.' }] });
     expect(run({ requiredExperienceYears: 2 }, { ...cv, totalExperienceYears: null }).results[0].reason).toMatch(/not found in CV/);
     expect(run({ requiredExperienceYears: 5 }, { ...cv, relevantExperienceYears: 6 }).overall).toBe('Pass'); // HR's relevant years count first
     expect(run({ requiredEducation: 'BSc in Textile Engineering' }, { cvText: 'no education written' }).results[0].reason).toMatch(/no degree found in CV/);
+  });
+
+  it('the subject must belong to the degree itself, not to jobs or companies elsewhere in the CV (owner, 2026-11-08)', () => {
+    const textileJobs = 'Worked 5 years at Ananta Textile Mills Ltd as Merchandiser. Training: Textile Testing.';
+    const eee = { degree: 'Bachelor of Science in Engineering', specialization: 'Electrical & Electronic Engineering', education: 'Bachelor of Science in Engineering, Electrical & Electronic Engineering - AIUB (3.62 out of 4, 2009)', totalExperienceYears: 16, cvText: textileJobs };
+    const mbs = { degree: 'Master of Business Studies (MBS)', specialization: 'Management', education: 'Master of Business Studies (MBS), Management - National University; Bachelor of Business Studies (BBS), Management - National University', cvText: textileJobs };
+    for (const other of [eee, mbs]) {
+      const r = run({ requiredEducation: 'bsc in textile' }, other);
+      expect(r.overall).toBe('Review Required');
+      expect(r.results[0].reason).toMatch(/no bsc in textile in the CV's education/);
+    }
+    // A BSc in Textile anywhere in the education list counts, even beside a higher degree in another subject; "Textiles" counts for "textile".
+    expect(run({ requiredEducation: 'bsc in textile' }, { ...mbs, education: `MBA, Marketing - DU; Bachelor of Science (BSc), Textile Engineering - BUTEX` }).overall).toBe('Pass');
+    expect(run({ requiredEducation: 'BSc in Textile' }, { degree: 'B.Sc. in Textiles', education: 'B.Sc. in Textiles - BUTEX (2015)' }).overall).toBe('Pass');
+    // A higher degree passes only in that subject: an MSc in Textile meets "BSc in Textile", an MBS in Management does not.
+    expect(run({ requiredEducation: 'BSc in Textile' }, { degree: 'MSc', specialization: 'Textile Engineering', education: 'MSc, Textile Engineering - BUTEX' }).overall).toBe('Pass');
+    // The subject and the degree must be in the same entry: a textile diploma does not turn an MBS into a textile degree.
+    expect(run({ requiredEducation: 'BSc in Textile' }, { ...mbs, education: `${mbs.education}; Diploma in Textile Engineering - Polytechnic` }).overall).toBe('Review Required');
+    // A PGD is not a degree in place of a BSc, and an unfinished one (Appeared / Enrolled) does not count at all (APP-2026-000038).
+    const pgd = { ...eee, education: `${eee.education}; Post Graduate Diploma (PGD), Textile Industry Management - BUTEX (Appeared, 2025)` };
+    const r = run({ requiredEducation: 'bsc in textile' }, pgd);
+    expect(r.overall).toBe('Review Required');
+    expect(r.results[0].reason).toMatch(/Post Graduate Diploma \(PGD\), Textile Industry Management is not finished/);
+    expect(run({ requiredEducation: 'bsc in textile' }, { ...eee, education: `${eee.education}; PGD, Textile Industry Management - BUTEX (2020)` }).overall).toBe('Review Required');
+    expect(run({ requiredEducation: 'bsc in textile' }, { degree: 'BSc', education: 'BSc, Textile Engineering - BUTEX (Running)' }).overall).toBe('Review Required');
+    // With no degree named, the words must be in the education too.
+    expect(run({ requiredEducation: 'Textile background' }, eee).results[0].reason).toMatch(/not found in the CV's education/);
   });
 });

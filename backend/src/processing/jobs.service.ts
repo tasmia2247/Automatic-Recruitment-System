@@ -48,11 +48,16 @@ export class JobsService implements OnApplicationBootstrap, OnModuleDestroy {
     return n;
   }
 
+  /**
+   * One tick works until the queue is empty instead of stopping after a few jobs and waiting for the next interval, with
+   * `WORKER_CONCURRENCY` lanes claiming jobs side by side (SKIP LOCKED keeps them apart). Load test, 2026-11-09: 3,000 CVs
+   * uploaded at once used to take about 20 minutes, mostly in the pauses between ticks.
+   */
   private async tick() {
     if (this.running) return;
     this.running = true;
     try {
-      await this.drain(25);
+      await Promise.all(Array.from({ length: config.workerConcurrency }, () => this.drain(1000)));
     } finally {
       this.running = false;
     }

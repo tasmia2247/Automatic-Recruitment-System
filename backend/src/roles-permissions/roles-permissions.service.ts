@@ -81,7 +81,8 @@ export class RolesPermissionsService {
       // DTO fields the client left out are present as undefined; only apply the ones it sent.
       Object.assign(user, Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)));
       if (departmentScopes) user.departmentScopes = await this.scopes(m, departmentScopes);
-      if (password) user.passwordHash = await bcrypt.hash(password, 10);
+      // A new password also ends the user's open sessions (security test, 2026-11-09).
+      if (password) { user.passwordHash = await bcrypt.hash(password, 10); user.sessionsValidFrom = new Date(); }
 
       // Never let an administrator lock themselves out of this screen.
       if (user.id === me.id) {

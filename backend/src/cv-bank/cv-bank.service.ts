@@ -4,13 +4,13 @@ import { DataSource } from 'typeorm';
 import { AuthUser } from '../common/auth';
 import { paged, skipTake } from '../common/pagination';
 import { P } from '../common/permissions';
-import { assertApplicationAccess, coordinatorScope } from '../common/scope';
-import { AuditService } from '../common/services';
+import { assertApplicationAccess, assertApplicationsAccess, coordinatorScope } from '../common/scope';
+import { AuditService, StorageService } from '../common/services';
 import { JoiningRecord } from '../database/entities';
 import { CandidatesService } from '../candidates/candidates.service';
 import { EvaluationService } from '../evaluation/evaluation.service';
 import { JoiningService } from '../joining/joining.service';
-import { ApplicationStatus, CvBankQuery, StatusChangeDto } from './cv-bank.dto';
+import { ApplicationStatus, BulkDeleteDto, CvBankQuery, StatusChangeDto } from './cv-bank.dto';
 
 /** Single SQL definition of the derived status. Needs aliases `a` (applications) and `j` (joining_records, LEFT JOIN). */
 export const STATUS_SQL = `(CASE
@@ -73,6 +73,7 @@ export class CvBankService {
   constructor(
     @InjectDataSource() private readonly ds: DataSource,
     private readonly audit: AuditService,
+    private readonly storage: StorageService,
     private readonly candidates: CandidatesService,
     private readonly evaluation: EvaluationService,
     private readonly joining: JoiningService,
@@ -146,14 +147,15 @@ export class CvBankService {
                 v.id AS "vacancyId", v."vacancyNo", v."positionTitle", d.id AS "departmentId", d.name AS department,
                 co.code AS "companyCode", co.name AS company, j.status AS "joiningStatus",
                 ${STATUS_SQL} AS status,
-                doc.id AS "documentId", doc."originalName" AS "documentName",
-                (SELECT count(*)::int FROM jsonb_array_elements(sr.results) e WHERE e->>'outcome' = 'Pass') AS "criteriaMet",
-                jsonb_array_length(sr.results) AS "criteriaTotal", sr."criteriaVersion", sr.basis AS "screeningBasis",
+                doc.id AS "documentId", doc."originalName" AS "documentName", coalesce(doc."hasFile", false) AS "hasFile",
+                -- The must-haves and the match score; a requirement line that only adds to the score is not counted on its own.
+                (SELECT count(*)::int FROM jsonb_array_elements(sr.results) e WHERE e->>'outcome' = 'Pass' AND (sr.basis = 'JOB_POST' OR (e->>'mandatory')::boolean)) AS "criteriaMet",
+                (SELECT count(*)::int FROM jsonb_array_elements(sr.results) e WHERE sr.basis = 'JOB_POST' OR (e->>'mandatory')::boolean) AS "criteriaTotal", a."screeningScore"::float AS "screeningScore", sr."criteriaVersion", sr.basis AS "screeningBasis",
                 rm.text AS "latestRemark", coalesce(rm.n, 0)::int AS "remarkCount",
                 GREATEST(a."updatedAt", stg.t, j."updatedAt", rm."createdAt") AS "lastUpdated"
          ${from}
          LEFT JOIN screening_runs sr ON sr.id = a."latestScreeningRunId"
-         LEFT JOIN LATERAL (SELECT id, "originalName" FROM candidate_documents WHERE "applicationId" = a.id ORDER BY "createdAt" DESC LIMIT 1) doc ON true
+         LEFT JOIN LATERAL (SELECT id, "originalName", "storageKey" IS NOT NULL AS "hasFile" FROM candidate_documents WHERE "applicationId" = a.id ORDER BY "createdAt" DESC LIMIT 1) doc ON true
          LEFT JOIN LATERAL (SELECT text, "createdAt", count(*) OVER () AS n FROM candidate_remarks WHERE "applicationId" = a.id ORDER BY "createdAt" DESC LIMIT 1) rm ON true
          LEFT JOIN LATERAL (SELECT max("updatedAt") AS t FROM candidate_stages WHERE "applicationId" = a.id) stg ON true
          ${where}
@@ -232,5 +234,83 @@ export class CvBankService {
   private async row(applicationId: string, me: AuthUser) {
     const res = await this.applications({ applicationId, page: 1, pageSize: 1 } as any, me);
     return res.items[0];
+  }
+
+  /**
+   * Permanently deletes the given applications and everything under them (owner, 2026-11-09):
+   * documents and files, extraction/screening runs, stages, marks, remarks, pending joining
+   * records, emails and intake links pointing at them, processing jobs and notifications.
+   * Applications of candidates who have **Joined** (any approved joining record anywhere) are
+   * refused up front with 409, so joined-candidate records are never touched. Candidates left
+   * with no other application are deleted too; a candidate who also applied elsewhere is kept.
+   * Stored files are erased after the commit. One `candidate.bulk_delete` audit entry records
+   * the counts.
+   */
+  async bulkDelete(dto: BulkDeleteDto, me: AuthUser) {
+    await assertApplicationsAccess(this.ds, me, dto.ids);
+    const files: string[] = [];
+    const result = await this.ds.transaction(async (m) => {
+      const q = async (sql: string, params: unknown[]) => m.query(sql, params) as Promise<any[]>;
+      const ids = async (sql: string, params: unknown[]) => (await q(sql, params)).map((x) => x.id as string);
+      const del = async (sql: string, params: unknown[]) => Number((await m.query(sql, params))[1] ?? 0);
+      const apps = await ids(`SELECT id FROM applications WHERE id = ANY($1::uuid[])`, [dto.ids]);
+      if (!apps.length) throw new NotFoundException('No matching applications to delete.');
+
+      // A joined candidate must not be deleted: not this application, and not any other
+      // application of a candidate who has joined anywhere (their records are kept elsewhere).
+      const joined = await q(
+        `SELECT a."applicationNo" AS app, cd.name, cd."candidateNo"
+           FROM applications a JOIN candidates cd ON cd.id = a."candidateId"
+          WHERE a.id = ANY($1::uuid[])
+            AND EXISTS (SELECT 1 FROM joining_records j
+                          JOIN applications a2 ON a2.id = j."applicationId"
+                         WHERE a2."candidateId" = cd.id AND j.status = 'Approved')
+          ORDER BY a."applicationNo"`,
+        [apps]);
+      if (joined.length) {
+        const names = joined.slice(0, 5).map((r: any) => `${r.app} (${r.name ?? r.candidateNo})`).join(', ');
+        const more = joined.length > 5 ? ` and ${joined.length - 5} more` : '';
+        throw new ConflictException(
+          `${joined.length} selected CV${joined.length === 1 ? ' is' : 's are'} of candidates who have already joined — these cannot be deleted so their joining records stay intact: ${names}${more}.`);
+      }
+      const cands = (await q(`SELECT DISTINCT "candidateId" AS id FROM applications WHERE id = ANY($1::uuid[])`, [apps])).map((x) => x.id as string);
+      const labels = (await q(`SELECT a."applicationNo" AS app, cd.name, cd."candidateNo" FROM applications a JOIN candidates cd ON cd.id = a."candidateId" WHERE a.id = ANY($1::uuid[])`, [apps]));
+      const events = await ids(`SELECT id FROM email_events WHERE "applicationId" = ANY($1::uuid[])`, [apps]);
+      files.push(...(await q(`SELECT "storageKey" FROM candidate_documents WHERE "applicationId" = ANY($1::uuid[]) AND "storageKey" IS NOT NULL`, [apps])).map((x) => x.storageKey));
+
+      const counts: Record<string, number> = {};
+      const refs = [...apps, ...events];
+      await del(`DELETE FROM processing_jobs WHERE "refId" = ANY($1::uuid[])`, [refs]);
+      await del(`DELETE FROM notifications WHERE link = ANY($1::text[])`, [apps.map((a) => `/applications/${a}`)]);
+      const batches = (await q(`SELECT DISTINCT "batchId" AS id FROM email_events WHERE id = ANY($1::uuid[])`, [events])).map((x) => x.id as string);
+      counts.emails = await del(`DELETE FROM email_events WHERE id = ANY($1::uuid[])`, [events]);
+      await del(`DELETE FROM email_batches b WHERE b.id = ANY($1::uuid[]) AND NOT EXISTS (SELECT 1 FROM email_events e WHERE e."batchId" = b.id)`, [batches]);
+      counts.joining = await del(`DELETE FROM joining_records WHERE "applicationId" = ANY($1::uuid[])`, [apps]);
+      counts.marks = await del(`DELETE FROM evaluation_marks WHERE "applicationId" = ANY($1::uuid[])`, [apps]);
+      for (const t of ['candidate_stages', 'candidate_remarks', 'screening_runs', 'extraction_runs', 'candidate_documents']) {
+        await del(`DELETE FROM ${t} WHERE "applicationId" = ANY($1::uuid[])`, [apps]);
+      }
+      // Unlink deleted applications from any intake mail attachments pointing at them.
+      await m.query(
+        `UPDATE intake_messages SET attachments = COALESCE((
+            SELECT jsonb_agg(CASE WHEN (a->>'applicationId') = ANY($1::text[]) THEN a - 'applicationId' ELSE a END)
+              FROM jsonb_array_elements(attachments) a), '[]'::jsonb)
+          WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(attachments) a WHERE (a->>'applicationId') = ANY($1::text[]))`,
+        [apps]);
+      counts.applications = await del(`DELETE FROM applications WHERE id = ANY($1::uuid[])`, [apps]);
+      const orphans = await ids(`SELECT c.id FROM candidates c WHERE c.id = ANY($1::uuid[]) AND NOT EXISTS (SELECT 1 FROM applications a WHERE a."candidateId" = c.id)`, [cands]);
+      await m.query(`UPDATE applications SET "suspectedDuplicateCandidateId" = NULL, "duplicateReview" = CASE WHEN "duplicateReview" = 'PENDING' THEN 'NONE' ELSE "duplicateReview" END WHERE "suspectedDuplicateCandidateId" = ANY($1::uuid[])`, [orphans]);
+      counts.candidates = await del(`DELETE FROM candidates WHERE id = ANY($1::uuid[])`, [orphans]);
+
+      const reason = dto.reason?.trim() || null;
+      await this.audit.log(m, me, 'candidate.bulk_delete', 'Application', apps[0], {
+        label: `${apps.length} CV${apps.length === 1 ? '' : 's'}`,
+        old: { applications: labels.map((l) => ({ applicationNo: l.app, candidateNo: l.candidateNo, name: l.name })) },
+        new: { reason, deleted: counts },
+      });
+      return { deleted: true, counts };
+    });
+    for (const key of files) this.storage.remove(key);
+    return result;
   }
 }

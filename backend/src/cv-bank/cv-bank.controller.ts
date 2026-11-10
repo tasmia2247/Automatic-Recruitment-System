@@ -3,7 +3,7 @@ import {
 } from '@nestjs/common';
 import { AuthUser, CurrentUser, RequirePerm } from '../common/auth';
 import { P } from '../common/permissions';
-import { CvBankQuery, StatusChangeDto } from './cv-bank.dto';
+import { BulkDeleteDto, CvBankQuery, StatusChangeDto } from './cv-bank.dto';
 import { CvBankService } from './cv-bank.service';
 
 @Controller()
@@ -27,5 +27,13 @@ export class CvBankController {
   @RequirePerm(P.CANDIDATE_VIEW)
   changeStatus(@Param('id', ParseUUIDPipe) id: string, @Body() dto: StatusChangeDto, @CurrentUser() me: AuthUser) {
     return this.svc.changeStatus(id, dto, me);
+  }
+
+  /** Permanently deletes the selected CVs / applications and their data (Super Admin by default). */
+  @Post('cv-bank/applications/delete')
+  @HttpCode(200)
+  @RequirePerm(P.CANDIDATE_DELETE)
+  bulkDelete(@Body() dto: BulkDeleteDto, @CurrentUser() me: AuthUser) {
+    return this.svc.bulkDelete(dto, me);
   }
 }

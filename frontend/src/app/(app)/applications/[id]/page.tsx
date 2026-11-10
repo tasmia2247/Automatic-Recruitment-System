@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { Alert, Badge, Button, Card, DL, Field, Input, Loaded, PageHeader, Table, Tabs, Td, Textarea, useAction, useLoad } from '@/components/ui';
+import { Alert, Badge, Button, Card, DL, Field, Input, Loaded, PageHeader, ScoreBar, Table, Tabs, Td, Textarea, useAction, useLoad } from '@/components/ui';
 import { api, fmtDate, fmtDateTime, show } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
@@ -68,7 +68,7 @@ export default function ApplicationPage() {
             <div className="mb-4 space-y-2">
               <Alert>{act.error}</Alert>
               <Alert tone="success">{act.message}</Alert>
-              {a.processingStatus === 'Failed' && <Alert>CV processing failed: {a.processingError}. The original CV is preserved; retry from the Processing Monitor or correct the data manually.</Alert>}
+              {a.processingStatus === 'Failed' && <Alert>CV processing failed: {a.processingError}. The file is kept so you can open it below; enter the data with "Correct data", after which the file is deleted.</Alert>}
               {['Queued', 'Processing'].includes(a.processingStatus) && <Alert tone="info">CV is being processed ({a.processingStatus})…</Alert>}
               {a.duplicateReview === 'PENDING' && a.suspectedDuplicate && (
                 <Card className="border-amber-300" title="Possible duplicate candidate — needs review">
@@ -86,21 +86,31 @@ export default function ApplicationPage() {
             </div>
 
             <Tabs active={tab} onChange={setTab} tabs={[
+              // The Emails and Activity tabs were removed (owner, 2026-11-08); actions stay in the Audit Log.
               { key: 'profile', label: 'Profile & CV' }, { key: 'screening', label: 'Screening' }, { key: 'evaluation', label: 'Marks & decision' },
-              { key: 'emails', label: `Emails (${a.emails.length})` }, { key: 'history', label: 'Activity' },
             ]} />
 
             {tab === 'profile' && (
               <div className="grid gap-4 xl:grid-cols-2">
-                <Card title="Original CV" actions={doc && can(P.CV_DOWNLOAD) && <a className="text-sm text-brand-700 hover:underline" target="_blank" href={`/api/documents/${doc.id}`}>Open in new tab</a>} pad={false}>
-                  {!doc ? <p className="p-4 text-sm text-muted">No document.</p> : !can(P.CV_DOWNLOAD) ? <p className="p-4 text-sm text-muted">You do not have permission to view CV files.</p>
+                <Card title={doc && !doc.storageKey ? 'CV text' : 'Original CV'} actions={doc?.storageKey && can(P.CV_DOWNLOAD) && <a className="text-sm text-brand-700 hover:underline" target="_blank" href={`/api/documents/${doc.id}`}>Open in new tab</a>} pad={false}>
+                  {!doc ? <p className="p-4 text-sm text-muted">No document.</p> : !can(P.CV_DOWNLOAD) ? <p className="p-4 text-sm text-muted">You do not have permission to view CVs.</p>
+                    // CV files are not kept once read (owner, 2026-11-08): the text read from the file is shown instead.
+                    : !doc.storageKey
+                      ? doc.textContent
+                        ? <><p className="border-b border-line bg-slate-50 px-4 py-2 text-xs text-muted">The original file is not kept. This is the text ARS read from it, in reading order.</p>
+                          <pre className="h-[70vh] overflow-auto whitespace-pre-wrap break-words p-4 font-sans text-xs leading-relaxed text-ink">{doc.textContent}</pre></>
+                        : <p className="p-4 text-sm text-muted">The file could not be read and is no longer kept; the data was entered by hand.</p>
                     : /pdf|text/.test(doc.mimeType) || /\.(pdf|txt)$/i.test(doc.originalName)
                       ? <iframe title="CV preview" src={`/api/documents/${doc.id}`} className="h-[70vh] w-full rounded-b-lg" />
                       : <p className="p-4 text-sm">Preview is not available for this file type. <a className="text-brand-700 underline" href={`/api/documents/${doc.id}`}>Download {doc.originalName}</a></p>}
                   {doc && <div className="border-t border-line px-4 py-2 text-xs text-muted">{doc.originalName} · {(doc.size / 1024).toFixed(0)} KB · {doc.source === 'EMAIL' ? 'email intake' : 'manual upload'} · {fmtDateTime(doc.createdAt)}</div>}
                 </Card>
                 <div className="space-y-4">
-                  <Card title="Extracted data" actions={can(P.CANDIDATE_EDIT) && !edit && <Button size="sm" variant="secondary" onClick={startEdit}>Correct data</Button>}>
+                  <Card title="Extracted data" actions={!edit && <>
+                    {doc && can(P.SCREENING_RUN) && <Button size="sm" variant="ghost" title="Read this CV again with the latest reading rules, then screen it again. Fields corrected by hand are kept."
+                      onClick={() => act.run(() => api(`/applications/${id}/reread`, { method: 'POST' }), 'The CV is being read again; screening follows. Fields corrected by hand are kept.').then(() => setTimeout(state.reload, 800))}>Re-read CV</Button>}
+                    {can(P.CANDIDATE_EDIT) && <Button size="sm" variant="secondary" onClick={startEdit}>Correct data</Button>}
+                  </>}>
                     <p className="mb-3 text-xs text-muted">Values come only from the CV text; anything not found stays empty for review. Extraction: <Badge>{a.extractionStatus ?? a.processingStatus}</Badge>{ex?.missingFields?.length ? <> · missing: {ex.missingFields.join(', ')}</> : null}{a.correctedFields.length ? <> · corrected by HR: {a.correctedFields.join(', ')}</> : null}</p>
                     {edit ? (
                       <>
@@ -133,11 +143,24 @@ export default function ApplicationPage() {
             {tab === 'screening' && (
               <div className="space-y-4">
                 {!run ? <Alert tone="info">Not screened yet. CVs are screened against the Specialization required of the requisition, or of a Direct HR vacancy; without it they are not screened.</Alert> : (
-                  <Card title={<>Latest screening · {runBasis(run)} · {fmtDateTime(run.createdAt)}</>} actions={<Badge>{run.overallResult}</Badge>} pad={false}>
+                  <Card title={<>Latest screening · {runBasis(run)} · {fmtDateTime(run.createdAt)}</>} actions={<>{run.score != null && <ScoreBar score={run.score} passMark={run.scoreParts?.passMark} />}<Badge>{run.overallResult}</Badge></>} pad={false}>
+                    {run.scoreParts && (
+                      <div className="border-b border-line p-4 text-sm">
+                        <div className="mb-2 font-medium">Match score {run.score}% <span className="font-normal text-muted">(pass mark {run.scoreParts.passMark}%; keywords of each requirement line searched in the CV)</span></div>
+                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                          {run.scoreParts.parts.map((p: any) => (
+                            <div key={p.key} className="rounded-md border border-line p-2">
+                              <div className="text-xs text-muted">{p.label} · weight {p.weight}</div>
+                              <div className="tabular-nums"><b>{Math.round(p.earned * p.weight * 10) / 10}</b> <span className="text-xs text-muted">of {p.weight} ({Math.round(p.earned * 1000) / 10}% matched)</span></div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <Table head={['Criterion', 'Type', 'Expected', 'Found in CV', 'Outcome', 'Reason']}>
                       {run.results.map((c: any) => (
-                        <tr key={c.criterionId}><Td>{c.label}</Td><Td>{c.mandatory ? 'Mandatory' : 'Preferred'}</Td><Td className="text-xs">{c.operator === 'mentions' ? 'written in CV:' : c.operator === 'education' ? 'degree and subject:' : c.operator === 'min_years' ? 'at least (years):' : c.operator} {c.expected}</Td>
-                          <Td className="text-xs">{show(c.actual, 'missing')}</Td><Td><Badge tone={c.outcome === 'Pass' ? 'green' : c.outcome === 'Fail' ? 'red' : 'amber'}>{c.outcome === 'Missing' ? 'Review' : c.outcome}</Badge></Td><Td className="text-xs">{c.reason}</Td></tr>
+                        <tr key={c.criterionId}><Td>{c.label}</Td><Td>{c.operator === 'keywords' ? 'Scored' : c.mandatory ? 'Mandatory' : 'Preferred'}</Td><Td className="text-xs">{c.operator === 'mentions' ? 'written in CV:' : c.operator === 'education' ? 'degree and subject:' : c.operator === 'min_years' ? 'at least (years):' : c.operator === 'keywords' ? 'keywords:' : c.operator === 'score' ? 'pass mark (%):' : c.operator} {c.expected}</Td>
+                          <Td className="text-xs">{show(c.actual, 'missing')}</Td><Td><Badge tone={c.outcome === 'Pass' ? 'green' : c.outcome === 'Fail' ? 'red' : 'amber'}>{c.outcome !== 'Missing' ? c.outcome : c.operator !== 'keywords' ? 'Review' : c.actual ? 'Partly' : 'Not found'}</Badge></Td><Td className="text-xs">{c.reason}</Td></tr>
                       ))}
                     </Table>
                   </Card>
@@ -176,27 +199,6 @@ export default function ApplicationPage() {
                   ]} />
                 </Card>
               </div>
-            )}
-
-            {tab === 'emails' && (
-              <Card pad={false}>
-                {a.emails.length ? (
-                  <Table head={['When', 'Type', 'Recipient', 'Subject', 'Status', 'Transport']}>
-                    {a.emails.map((e: any) => <tr key={e.id}><Td className="text-xs">{fmtDateTime(e.sentAt ?? e.createdAt)}</Td><Td className="text-xs">{e.kind}</Td><Td className="text-xs">{e.recipient}</Td><Td className="text-xs">{e.subject}</Td><Td><Badge>{e.status}</Badge></Td><Td className="text-xs">{e.transport === 'dev-outbox' ? 'dev outbox (not delivered)' : show(e.transport)}</Td></tr>)}
-                  </Table>
-                ) : <p className="p-4 text-sm text-muted">No emails.</p>}
-              </Card>
-            )}
-
-            {tab === 'history' && (
-              <Card pad={false}>
-                <Table head={['When', 'Who', 'Action', 'Changes']}>
-                  {a.history.map((h: any) => (
-                    <tr key={h.id}><Td className="whitespace-nowrap text-xs">{fmtDateTime(h.createdAt)}</Td><Td>{h.actorName}</Td><Td className="text-xs">{h.action}</Td>
-                      <Td className="text-xs">{h.newValues ? Object.entries(h.newValues).map(([k, v]) => <div key={k}><b>{k}</b>: {h.oldValues && k in h.oldValues ? <><s className="text-muted">{String(h.oldValues[k])}</s> → </> : null}{typeof v === 'object' ? JSON.stringify(v) : String(v)}</div>) : '—'}</Td></tr>
-                  ))}
-                </Table>
-              </Card>
             )}
           </>
         );

@@ -1,5 +1,5 @@
 import {
-  BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleInit,
+  BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import * as fs from 'fs';
@@ -14,7 +14,7 @@ import {
   Application, CandidateStage, EmailBatch, EmailEvent, EmailTemplate, EmailTemplateVersion, JoiningRecord, TemplateKind,
 } from '../database/entities';
 import { JobsService, RetryableError } from '../processing/jobs.service';
-import { ComposeDto, HistoryQuery, SendDto, TemplateDto } from './email.dto';
+import { ComposeDto, SendDto, TemplateDto } from './email.dto';
 
 /** Placeholders available in templates. Values come from ARS records or the sender's per-send variables. */
 export const PLACEHOLDERS = [
@@ -217,36 +217,5 @@ export class EmailService implements OnModuleInit {
   /** Coordinators may only email candidates of the vacancies they coordinate. */
   assertRecipients(applicationIds: string[], me: AuthUser) {
     return assertApplicationsAccess(this.ds, me, applicationIds);
-  }
-
-  /** Retry only failed sends (SRS 12.4). */
-  async retry(eventId: string, me: AuthUser) {
-    return this.ds.transaction(async (m) => {
-      const ev = await m.findOne(EmailEvent, { where: { id: eventId }, lock: { mode: 'pessimistic_write' } });
-      if (!ev) throw new NotFoundException();
-      await assertApplicationsAccess(m, me, [ev.applicationId]);
-      if (ev.status !== 'Failed') throw new ConflictException(`Only failed emails can be retried (this one is ${ev.status}).`);
-      ev.status = 'Queued';
-      await m.save(ev);
-      await this.jobs.enqueue(m, 'EMAIL_SEND', ev.id, `retry ${ev.kind}`);
-      await this.audit.log(m, me, 'email.retry', 'Application', ev.applicationId, { new: { recipient: ev.recipient } });
-      return ev;
-    });
-  }
-
-  async history(q: HistoryQuery, me: AuthUser) {
-    const qb = this.ds.getRepository(EmailEvent).createQueryBuilder('e')
-      .leftJoin(Application, 'a', 'a.id = e.applicationId').leftJoin('a.candidate', 'c')
-      .addSelect(['a.applicationNo', 'c.name']).orderBy('e.createdAt', 'DESC').take(500);
-    const scope = coordinatorScope(me);
-    if (scope) qb.innerJoin('vacancies', 'v', 'v.id = a.vacancyId AND v.coordinatorId = :me', { me: scope });
-    if (q.vacancyId) qb.andWhere('a.vacancyId = :v', { v: q.vacancyId });
-    if (q.status) qb.andWhere('e.status = :s', { s: q.status });
-    if (q.kind) qb.andWhere('e.kind = :k', { k: q.kind });
-    const { entities, raw } = await qb.getRawAndEntities();
-    return entities.map((e, i) => {
-      const { body, ...rest } = e;
-      return { ...rest, applicationNo: raw[i]?.a_applicationNo, candidateName: raw[i]?.c_name };
-    });
   }
 }

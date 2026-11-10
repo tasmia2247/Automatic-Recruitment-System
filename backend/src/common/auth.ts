@@ -37,7 +37,9 @@ async function disabledPermissions(repo: Repository<User>) {
 
 export function effectivePermissions(user: User): Set<string> {
   const set = new Set<string>();
-  for (const r of user.roles ?? []) if (r.active) r.permissions.forEach((p) => set.add(p));
+  // Role.active is a role-picker gate only (legacy roles hidden from new assignments). A user who still holds
+  // an inactive role keeps its permissions, so admins can migrate users off splinter roles without a flash of 403s.
+  for (const r of user.roles ?? []) r.permissions.forEach((p) => set.add(p));
   user.extraPermissions?.forEach((p) => set.add(p));
   user.deniedPermissions?.forEach((p) => set.delete(p));
   return set;
@@ -73,7 +75,7 @@ export class AuthGuard implements CanActivate {
     const token = req.cookies?.[AUTH_COOKIE] ?? (header?.startsWith('Bearer ') ? header.slice(7) : undefined);
     if (!token) throw new UnauthorizedException('Please sign in.');
 
-    let payload: { sub: string };
+    let payload: { sub: string; iat?: number; iatMs?: number };
     try {
       payload = await this.jwt.verifyAsync(token);
     } catch {
@@ -81,6 +83,11 @@ export class AuthGuard implements CanActivate {
     }
     const user = await this.users.findOne({ where: { id: payload.sub }, relations: { roles: true } });
     if (!user || !user.active || user.deletedAt) throw new UnauthorizedException('Account is inactive.');
+    // A token from before the last sign-out or password reset is no longer valid. Tokens carry `iatMs`; older ones only whole-second `iat`.
+    const issuedMs = payload.iatMs ?? (payload.iat ?? 0) * 1000;
+    if (user.sessionsValidFrom && issuedMs < user.sessionsValidFrom.getTime()) {
+      throw new UnauthorizedException('Your session has ended. Please sign in again.');
+    }
 
     const permissions = effectivePermissions(user);
     for (const code of await disabledPermissions(this.users)) permissions.delete(code);

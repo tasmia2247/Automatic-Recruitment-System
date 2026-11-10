@@ -54,8 +54,8 @@ const USERS: [string, string, string, string | null, string[]][] = [
   ['hod.hr@ars.local', 'HOD-HR', 'Head of HR', 'HR', ['APPROVER']],
   ['approval.admin@ars.local', 'Requisition Admin', 'Admin, Requisition Approvals', null, ['ADMIN']],
   ['hr.manager@ars.local', 'HR Manager', 'Manager, Recruitment', 'HR', ['HR_MANAGER']],
-  ['recruiter@ars.local', 'HR Recruiter', 'Executive, Recruitment', 'HR', ['HR_RECRUITER']],
-  ['recruiter2@ars.local', 'HR Coordinator Two', 'Asst. Executive, Recruitment', 'HR', ['HR_RECRUITER']],
+  ['recruiter@ars.local', 'HR Recruiter', 'Executive, Recruitment', 'HR', ['HR_COORDINATOR']],
+  ['recruiter2@ars.local', 'HR Coordinator Two', 'Asst. Executive, Recruitment', 'HR', ['HR_COORDINATOR']],
   ['screener@ars.local', 'CV Screening User', 'Asst. Executive, HR', 'HR', ['CV_SCREENER']],
   ['examiner@ars.local', 'Interview Examiner', 'Sr. Manager, ICT', 'ICT', ['EXAMINER']],
   ['viewer@ars.local', 'Management Viewer', 'Management', null, ['READ_ONLY']],
@@ -163,14 +163,14 @@ export async function seed(ds: DataSource, log = console.log) {
   for (const r of DEFAULT_ROLES) {
     const existing = await m.findOne(Role, { where: { code: r.code } });
     // Keep Super Admin edits to existing roles; only create missing roles (Super Admin always gets all permissions).
-    if (!existing) await m.save(Role, m.create(Role, { ...r, active: true }));
+    if (!existing) await m.save(Role, m.create(Role, { ...r, active: r.active ?? true }));
     else if (r.code === 'SUPER_ADMIN') await m.update(Role, existing.id, { permissions: r.permissions });
   }
   // Starter permission templates, only on a fresh install (deleted templates are not brought back).
   if (!(await m.count(PermissionTemplate))) {
     const role = (code: string) => DEFAULT_ROLES.find((r) => r.code === code)!.permissions;
     await m.save(PermissionTemplate, [
-      { name: 'HR Coordinator', description: "Recruitment of assigned vacancies; every department's requisitions and quotas (view).", permissions: role('HR_RECRUITER'), departmentScopes: {} },
+      { name: 'HR Coordinator', description: "Recruitment of assigned vacancies; every department's requisitions and quotas (view).", permissions: role('HR_COORDINATOR'), departmentScopes: {} },
       { name: 'Department User - view only', description: "Own department's quotas, requisitions and joined candidates; no create or edit.", permissions: [P.MASTER_VIEW, P.QUOTA_VIEW, P.REQ_VIEW, P.JOINED_VIEW, P.DASHBOARD_DEPT], departmentScopes: {} },
       { name: 'Requisition Approver', description: 'Approver Inbox with final approval for every department.', permissions: role('ADMIN'), departmentScopes: {} },
     ].map((t) => m.create(PermissionTemplate, t)));

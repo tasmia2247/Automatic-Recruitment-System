@@ -14,7 +14,8 @@ import {
 } from '../database/entities';
 import { DirectVacancyDto, HrQueueQuery, JobPostDto, VacancyListQuery, VacancyUpdateDto } from './vacancies.dto';
 import { buildCircular, circularPdf, circularText, defaultSubject } from './circular';
-import { requirementCriteria } from '../screening/screening.engine';
+import { requirementSummary } from '../screening/screening.engine';
+import { requirementLines } from '../screening/keywords';
 
 const REQUIREMENT_FIELDS = ['requiredEducation', 'requiredSkills', 'requiredExperienceYears', 'specialization'] as const;
 type RequirementSource = Pick<Vacancy, (typeof REQUIREMENT_FIELDS)[number]>;
@@ -25,19 +26,21 @@ const screeningBasis = (v: RequirementSource, r: Requisition | null) => {
   return {
     source: r ? 'REQUISITION' : 'VACANCY', reqNo: r?.reqNo ?? null,
     education: src.requiredEducation ?? null, skills: src.requiredSkills ?? null, experienceYears: src.requiredExperienceYears ?? null, other: src.specialization ?? null,
-    items: requirementCriteria(src).map((c) => c.label),
+    keyResponsibilities: r?.jobDescription ?? null,
+    items: requirementSummary(r ?? { ...v, jobDescription: null }),
   };
 };
 
 /**
  * What a job post takes from its requisition (owner, 2026-11-05): Min Edu. Qualification → education, Experience → experience,
- * JD → key responsibilities, Skills → required skills (one per line, as the circular prints them). A Direct HR vacancy has only
+ * Key Responsibilities (the JD) → key responsibilities, Required Skills → required skills (one per line, as the circular prints them). A Direct HR vacancy has only
  * its own Skills. Other "Specialization required" fields (education/experience for screening, other requirements) never go on a post.
  */
 export function jobPostPrefill(v: Pick<Vacancy, 'requiredSkills'> & { requisition?: Requisition | null }) {
   const r = v.requisition ?? null;
   const skillsText = r ? r.requiredSkills : v.requiredSkills;
-  const skills = (skillsText ?? '').split(/[,;\n]/).map((x) => x.trim()).filter(Boolean).join('\n') || null;
+  // One per line; a sentence such as "Basic knowledge of programming, networking and IT" stays whole.
+  const skills = requirementLines(skillsText).join('\n') || null;
   const out = { education: r?.minEducation?.trim() || null, experienceRequirement: r?.experience?.trim() || null, duties: r?.jobDescription?.trim() || null, skills };
   return Object.fromEntries(Object.entries(out).filter(([, x]) => x)) as Partial<Record<keyof typeof out, string>>;
 }
@@ -71,10 +74,15 @@ export class VacancyService {
     if (q.view !== 'all') qb.andWhere('v.id IS NULL');
     if (q.departmentId) qb.andWhere('r.departmentId = :d', { d: q.departmentId });
     if (q.companyId) qb.andWhere('r.companyId = :c', { c: q.companyId });
+    if (q.approvedOn) qb.andWhere(`(r.approvedAt AT TIME ZONE 'Asia/Dhaka')::date = :day`, { day: q.approvedOn });
     if (q.q) qb.andWhere(new Brackets((w) => w.where('r.reqNo ILIKE :q').orWhere('r.rank ILIKE :q')), { q: `%${q.q}%` });
     const { skip, take } = skipTake(q);
     const total = await qb.getCount();
     const { entities, raw } = await qb.offset(skip).limit(take).getRawAndEntities();
+    // Application counts for the Super Admin's Delete dialog (the vacancy itself is no longer shown here, owner 2026-11-08).
+    const vacancyIds = raw.map((x) => x.v_id).filter(Boolean);
+    const counts: { id: string; n: number }[] = vacancyIds.length
+      ? await this.ds.query(`SELECT "vacancyId" AS id, count(*)::int AS n FROM applications WHERE "vacancyId" = ANY($1::uuid[]) GROUP BY 1`, [vacancyIds]) : [];
     const items = entities.map((r) => {
       const row = raw.find((x) => x.r_id === r.id);
       return {
@@ -83,7 +91,7 @@ export class VacancyService {
         requester: { name: r.requester.name }, submittedAt: r.submittedAt, approvedAt: r.approvedAt, status: r.status,
         background: r.background,
         coordinator: r.coordinator ? { id: r.coordinator.id, name: r.coordinator.name } : null,
-        vacancy: row?.v_id ? { id: row.v_id, vacancyNo: row.v_vacancyNo, status: row.v_status } : null,
+        vacancy: row?.v_id ? { id: row.v_id, vacancyNo: row.v_vacancyNo, status: row.v_status, applications: counts.find((c) => c.id === row.v_id)?.n ?? 0 } : null,
       };
     });
     return paged(items, total, q);
@@ -178,7 +186,10 @@ export class VacancyService {
     const qb = this.ds.getRepository(Vacancy).createQueryBuilder('v')
       .leftJoinAndSelect('v.department', 'd').leftJoinAndSelect('v.company', 'c').leftJoinAndSelect('v.requisition', 'r')
       .leftJoinAndSelect('v.coordinator', 'co')
-      .orderBy('v.createdAt', 'DESC');
+      // Closed vacancies go to the end of the list (owner, 2026-11-08); newest first within each group.
+      .addSelect(`CASE WHEN v.status = 'Closed' THEN 1 ELSE 0 END`, 'closed_last')
+      .orderBy('closed_last', 'ASC')
+      .addOrderBy('v.createdAt', 'DESC');
     const scope = coordinatorScope(me);
     if (scope) qb.andWhere('v.coordinatorId = :me', { me: scope });
     if (q.status) qb.andWhere('v.status = :s', { s: q.status });
@@ -240,7 +251,9 @@ export class VacancyService {
     return this.ds.transaction(async (m) => {
       const v = await m.findOne(Vacancy, { where: { id: vacancyId }, relations: { requisition: true, department: true } });
       if (!v) throw new NotFoundException('Vacancy not found.');
-      if (['Closed', 'Filled'].includes(v.status)) throw new ConflictException(`Vacancy is ${v.status}.`);
+      // Only a Closed vacancy refuses a new job post; Filled is permissive so HR can post again
+      // when Selected candidates do not join and the Waiting pool has been exhausted (owner, 2026-11-09).
+      if (v.status === 'Closed') throw new ConflictException(`Vacancy is Closed.`);
       this.checkDates(dto);
       const jobNo = await this.ids.next(m, 'JOB');
       // The circular starts from the requisition's details (see jobPostPrefill); whatever the request sends wins.
@@ -297,6 +310,32 @@ export class VacancyService {
       await this.audit.log(m, me, 'jobpost.status_change', 'JobPost', id, { label: jp.jobNo, old: { status: old }, new: { status } });
       return jp;
     });
+  }
+
+  /**
+   * Deletes a job post (owner, 2026-11-08): `jobpost.edit` plus the coordinator scope, so the vacancy's HR coordinator, the HR
+   * Manager and the Super Admin. Candidates belong to the vacancy, not the post: their applications stay and only lose the link
+   * to the post. The post's screening criteria sets and its uploaded circular go with it; mails sent later with its subject are no
+   * longer matched to it. Any status.
+   */
+  async deleteJobPost(id: string, me: AuthUser) {
+    await assertJobPostAccess(this.ds, me, id);
+    let fileKey: string | null = null;
+    const result = await this.ds.transaction(async (m) => {
+      const jp = await m.findOne(JobPost, { where: { id }, relations: { vacancy: true }, lock: { mode: 'pessimistic_write', tables: ['job_posts'] } });
+      if (!jp) throw new NotFoundException('Job post not found.');
+      const [, unlinked] = await m.query(`UPDATE applications SET "jobPostId" = NULL WHERE "jobPostId" = $1`, [id]);
+      await m.query(`DELETE FROM screening_criteria_sets WHERE "jobPostId" = $1`, [id]); // criteria cascade
+      await m.query(`DELETE FROM notifications WHERE link LIKE $1`, [`/job-posts/${id}%`]);
+      await m.delete(JobPost, id);
+      fileKey = jp.circularAttachmentKey;
+      await this.audit.log(m, me, 'jobpost.delete', 'JobPost', id, {
+        label: jp.jobNo, old: { vacancy: jp.vacancy.vacancyNo, title: jp.title, status: jp.status, circularFile: jp.circularAttachmentName }, new: { applicationsUnlinked: Number(unlinked ?? 0) },
+      });
+      return { deleted: true, jobNo: jp.jobNo, vacancyId: jp.vacancyId, applicationsUnlinked: Number(unlinked ?? 0) };
+    });
+    if (fileKey) this.storage.remove(fileKey);
+    return result;
   }
 
   async attachCircular(id: string, file: Express.Multer.File, me: AuthUser) {

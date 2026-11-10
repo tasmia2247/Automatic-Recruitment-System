@@ -59,6 +59,21 @@ export class ConfirmDto {
   @IsOptional() @IsBoolean() allowOverwrite?: boolean;
 }
 
+/**
+ * Interview page "Remove" (owner, 2026-11-09): back one stage. `schedule` = the interview is cleared (date, attendance, marks), back to
+ * step 1; `screening` = also off the shortlist, back to the vacancy's Candidates & screening.
+ */
+export class MoveBackDto {
+  @IsArray() @ArrayMinSize(1, { message: 'Select at least one candidate.' }) @IsUUID('all', { each: true }) applicationIds: string[];
+  @IsIn(['schedule', 'screening']) to: 'schedule' | 'screening';
+}
+
+/** Interview Board: several candidates sent to Joining Pending with one planned joining date (owner, 2026-11-08). */
+export class SendToJoiningDto {
+  @IsArray() @ArrayMinSize(1, { message: 'Select at least one candidate.' }) @IsUUID('all', { each: true }) applicationIds: string[];
+  @IsDateString({ strict: true }, { message: 'Choose the planned joining date.' }) joiningDate: string;
+}
+
 export class DecisionDto {
   @IsIn(DECISIONS) decision: any;
   @IsOptional() @IsString() @MaxLength(2000) remarks?: string;

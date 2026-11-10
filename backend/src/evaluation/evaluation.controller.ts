@@ -11,7 +11,7 @@ import { P } from '../common/permissions';
 import { assertApplicationAccess, assertApplicationsAccess, assertImportAccess, assertVacancyAccess } from '../common/scope';
 import { STAGE_TYPES, StageType } from '../database/entities';
 import { EvaluationService } from './evaluation.service';
-import { ConfirmDto, DecisionDto, ImportQuery, InterviewBoardQuery, MainImportQuery, MarkDto, ScheduleDto, StageDto, TemplateQuery } from './evaluation.dto';
+import { ConfirmDto, DecisionDto, MoveBackDto, SendToJoiningDto, ImportQuery, InterviewBoardQuery, MainImportQuery, MarkDto, ScheduleDto, StageDto, TemplateQuery } from './evaluation.dto';
 
 @Controller()
 export class EvaluationController {
@@ -67,6 +67,48 @@ export class EvaluationController {
   async decide(@Param('id', ParseUUIDPipe) id: string, @Body() dto: DecisionDto, @CurrentUser() me: AuthUser) {
     await assertApplicationAccess(this.ds, me, id);
     return this.svc.finalDecision(id, dto.decision, dto.remarks, me);
+  }
+
+  /**
+   * Interview Board "Send to joining" (owner, 2026-11-08): each selected candidate gets the final decision Selected (if not
+   * already) and the planned joining date, so they wait in Joining Pending. Needs both rights; each candidate is checked on its
+   * own (coordinator scope, shortlisted, not already joined or rejected at joining), and one failure does not stop the rest.
+   */
+  @Post('applications/send-to-joining')
+  @HttpCode(200)
+  @RequirePerm(P.FINAL_DECISION, P.JOINING_APPROVE)
+  async sendToJoining(@Body() dto: SendToJoiningDto, @CurrentUser() me: AuthUser) {
+    const results: { applicationId: string; ok: boolean; error?: string }[] = [];
+    for (const id of [...new Set(dto.applicationIds)]) {
+      try {
+        await assertApplicationAccess(this.ds, me, id);
+        await this.svc.sendToJoining(id, dto.joiningDate, me);
+        results.push({ applicationId: id, ok: true });
+      } catch (e: any) {
+        const msg = e?.response?.message ?? e?.message ?? 'Failed.';
+        results.push({ applicationId: id, ok: false, error: Array.isArray(msg) ? msg.join(' ') : msg });
+      }
+    }
+    return { sent: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length, results };
+  }
+
+  /** Interview page "Remove": back one stage, per candidate (owner, 2026-11-09). */
+  @Post('interviews/move-back')
+  @HttpCode(200)
+  @RequirePerm(P.SHORTLIST)
+  async moveBack(@Body() dto: MoveBackDto, @CurrentUser() me: AuthUser) {
+    const results: { applicationId: string; ok: boolean; error?: string }[] = [];
+    for (const id of [...new Set(dto.applicationIds)]) {
+      try {
+        await assertApplicationAccess(this.ds, me, id);
+        await this.svc.moveBack(id, dto.to, me);
+        results.push({ applicationId: id, ok: true });
+      } catch (e: any) {
+        const msg = e?.response?.message ?? e?.message ?? 'Failed.';
+        results.push({ applicationId: id, ok: false, error: Array.isArray(msg) ? msg.join(' ') : msg });
+      }
+    }
+    return { moved: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length, results };
   }
 
   @Get('vacancies/:id/marks-template')

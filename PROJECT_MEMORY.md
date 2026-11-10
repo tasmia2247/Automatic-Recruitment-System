@@ -49,7 +49,7 @@ circular generation. **Always a human decision:** approving requisitions, shortl
 | Database | PostgreSQL (must be UTF8), TypeORM 1.x entities with versioned migrations |
 | Background work | DB-backed queue (`processing_jobs`) run by an in-process worker |
 | Files | Private local disk under `STORAGE_DIR`, served only through authorised API routes |
-| Documents | `exceljs` (Excel), `pdf-parse` and `mammoth` (reading CVs), `pdfkit` (circular PDF), `nodemailer` (email) |
+| Documents | `exceljs` (Excel), `pdf-parse`, `mammoth` and `word-extractor` (reading CVs), `pdfkit` (circular PDF), `nodemailer` (email) |
 | Auth | JWT in an httpOnly cookie, bcrypt password hashes |
 | DB admin | pgAdmin only; the app connects through `DATABASE_URL` |
 
@@ -127,7 +127,8 @@ Feature folders use `<feature>.controller.ts`, `.service.ts`, `.dto.ts`, `.modul
 ### Request handling
 
 1. `AuthGuard` (global `APP_GUARD`) skips `@Public()` routes. Otherwise it reads the `ars_token` cookie or a `Bearer` header,
-   verifies the JWT, loads the user and refuses inactive or deleted accounts with 401.
+   verifies the JWT, loads the user and refuses inactive or deleted accounts with 401, and refuses a token issued before the user's
+   `sessionsValidFrom` (set on sign-out and when an administrator sets a new password; tokens carry `iatMs`, 2026-11-09).
 2. It builds `AuthUser` (`id, name, email, departmentId, roles, permissions, scopes`) and checks `@RequirePerm(...)`.
    All listed permissions are required. A class-level `@RequirePerm` applies to every handler in the controller.
 3. `ValidationPipe({ whitelist, forbidNonWhitelisted, transform })`: unknown body fields are rejected with 400.
@@ -193,7 +194,7 @@ class to the next `17933000000NN` number, because generated timestamps sort **be
 `NODE_ENV`, `PORT`, `WEB_URL`, `DATABASE_URL`, `JWT_SECRET`, `JWT_EXPIRES_IN` (8h), `COOKIE_SECURE` (`auto`: Secure only for HTTPS requests, read from `req.secure` or `X-Forwarded-Proto`; `true`/`false` force it), `SEED_PASSWORD`, `CAREER_EMAIL`,
 `STORAGE_DIR` (`./storage`, relative to `backend/`), `MAIL_INTAKE_DIR` (`./mail-inbox`, relative to `backend/`), `MAX_UPLOAD_MB` (10), `ALLOWED_CV_EXTENSIONS` (pdf,docx,doc,txt),
 `ID_FORMAT_REQUISITION|VACANCY|JOBPOST|CANDIDATE|APPLICATION|IMPORT`, `SMTP_HOST|PORT|SECURE|USER|PASS`, `MAIL_FROM`,
-`WORKER_INTERVAL_MS` (3000), `WORKER_ENABLED`, `ALLOW_DIRECT_HR_VACANCY`, `REQUISITION_ID_ON` (`draft`|`submit`).
+`WORKER_INTERVAL_MS` (3000), `WORKER_CONCURRENCY` (4), `WORKER_ENABLED`, `ALLOW_DIRECT_HR_VACANCY`, `REQUISITION_ID_ON` (`draft`|`submit`).
 Frontend: `API_URL` (`frontend/.env.local`, default `http://localhost:4000`), read when the web app is **built** (rewrites are fixed at build time). Tests: `TEST_DATABASE_URL`, otherwise `DATABASE_URL` with the database name swapped to `ars_test`.
 
 Empty `SMTP_HOST` means emails are written to `backend/storage/outbox/*.eml` and **not delivered**; transport is recorded as `dev-outbox`.
@@ -236,7 +237,9 @@ Source of truth: `backend/src/common/permissions.ts`, `common/permission-matrix.
 
 ### 5.1 How a user's rights are computed
 
-`effective = (permissions of active roles) + user.extraPermissions − user.deniedPermissions − system-wide disabled codes`
+`effective = (permissions of every role the user holds) + user.extraPermissions − user.deniedPermissions − system-wide disabled codes`
+
+The role `active` flag is a UI picker gate only (hides legacy roles from new assignments). A user who still holds an inactive role keeps its permissions, so an admin can migrate users off a splinter role without a flash of 403s between the two edits.
 
 Applied per request in `AuthGuard`. Disabled codes are cached for 30 seconds and the cache is cleared when an admin changes one.
 Permission codes are fixed in code. A new code means nothing until the API checks it, so codes are not created at runtime.
@@ -245,20 +248,22 @@ Permission codes are fixed in code. A new code means nothing until the API check
 
 | Code | Name | Default permissions |
 | --- | --- | --- |
-| `DEPT_REQUESTER` | Department | `master.view`, `quota.view`, `quota.edit`, `requisition.view`, `requisition.create`, `requisition.edit`, `requisition.submit`, `requisition.cancel`, `joining.view_joined`, `dashboard.department` |
-| `HR_RECRUITER` | HR | "HR core": `master.view`, `quota.view`, `quota.view_all_departments`, `requisition.view`, `requisition.view_all_departments`, `vacancy.view`, `vacancy.edit`, `jobpost.edit`, `candidate.view`, `candidate.edit`, `cv.upload`, `cv.download`, `candidate.duplicate_review`, `screening.run`, `report.export`, `selection.shortlist`, `selection.override`, `evaluation.attendance`, `evaluation.marks`, `evaluation.import`, `evaluation.overwrite`, `selection.final_decision`, `email.send`, `email.manage_template`, `joining.view`, `joining.view_joined`, `joining.approve`, `monitor.view`, `dashboard.hr` |
+| `DEPT_REQUESTER` | Department Head | `master.view`, `quota.view`, `quota.edit`, `requisition.view`, `requisition.create`, `requisition.edit`, `requisition.submit`, `requisition.cancel`, `joining.view_joined`, `dashboard.department` |
+| `HR_COORDINATOR` | HR Coordinator | "HR core": `master.view`, `quota.view`, `quota.view_all_departments`, `requisition.view`, `requisition.view_all_departments`, `vacancy.view`, `vacancy.edit`, `jobpost.edit`, `candidate.view`, `candidate.edit`, `cv.upload`, `cv.download`, `candidate.duplicate_review`, `screening.run`, `report.export`, `selection.shortlist`, `selection.override`, `evaluation.attendance`, `evaluation.marks`, `evaluation.import`, `evaluation.overwrite`, `selection.final_decision`, `email.send`, `email.manage_template`, `joining.view`, `joining.view_joined`, `joining.approve`, `monitor.view`, `dashboard.hr`, `report.view` |
 | `HR_MANAGER` | HR Manager | HR core + `hr.queue`, `hr.assign_coordinator`, `recruitment.view_all`, `vacancy.create`, `vacancy.create_direct`, `monitor.retry`, `audit.view` |
-| `ADMIN` | Admin | `master.view`, `requisition.view`, `requisition.view_all_departments`, `approval.act`, `approval.act_on_behalf`, `dashboard.admin` |
+| `ADMIN` | Admin | `master.view`, `requisition.view`, `requisition.view_all_departments`, `approval.act`, `approval.act_on_behalf`, `dashboard.admin`, `report.view` |
 | `APPROVER` | Designated Requisition Approver | `master.view`, `approval.act` |
-| `CORPORATE_HR` | Corporate HR | `master.view`, `quota.view`, `approval.act`, `requisition.view`, `requisition.corporate_hr_remarks`, `requisition.quota_chart` |
-| `CV_SCREENER` | CV Screening User | `vacancy.view`, `candidate.view`, `candidate.edit`, `cv.download`, `screening.run` |
-| `EXAMINER` | Interview / Examiner | `vacancy.view`, `candidate.view`, `cv.download`, `evaluation.attendance`, `evaluation.marks`, `evaluation.import` |
-| `READ_ONLY` | Read-only User | `master.view`, `quota.view`, `requisition.view`, `vacancy.view`, `candidate.view`, `joining.view`, `joining.view_joined`, `dashboard.hr` |
+| `CORPORATE_HR` *(legacy, inactive)* | Corporate HR | `master.view`, `quota.view`, `approval.act`, `requisition.view`, `requisition.corporate_hr_remarks`, `requisition.quota_chart` |
+| `CV_SCREENER` *(legacy, inactive)* | CV Screening User | `vacancy.view`, `candidate.view`, `candidate.edit`, `cv.download`, `screening.run` |
+| `EXAMINER` *(legacy, inactive)* | Interview / Examiner | `vacancy.view`, `candidate.view`, `cv.download`, `evaluation.attendance`, `evaluation.marks`, `evaluation.import` |
+| `READ_ONLY` *(legacy, inactive)* | Read-only User | `master.view`, `quota.view`, `requisition.view`, `vacancy.view`, `candidate.view`, `joining.view`, `joining.view_joined`, `dashboard.hr` |
 | `SUPER_ADMIN` | Super Admin | All permissions |
 
 Codes not in any default role except Super Admin: `master.configure`, `requisition.manage_all`, `approval.configure_route`, `admin.users`.
 
-`COORDINATOR_ROLES = ['HR_RECRUITER', 'HR_MANAGER']`: active members of these active roles are the coordinator candidates.
+**Role consolidation (owner, 2026-11-10).** The business keeps five end-user categories: Super Admin, Department Head, Admin, HR Manager, HR Coordinator (plus `APPROVER` for the approval chain). `HR_RECRUITER` was renamed to `HR_COORDINATOR` in migration `1793300000021`, and the four splinter roles (`CORPORATE_HR`, `CV_SCREENER`, `EXAMINER`, `READ_ONLY`) are marked `active = false` so the admin role picker hides them; existing assignments and seed users still function because permission resolution ignores `active` (see 5.1).
+
+`COORDINATOR_ROLES = ['HR_COORDINATOR', 'HR_MANAGER']`: members of these roles are the coordinator candidates.
 
 **Seed behaviour.** `seed.ts` creates missing roles and **does not overwrite existing roles** (Super Admin edits survive),
 except `SUPER_ADMIN`, which is reset to all permissions on every run. So changing a default role for an existing database
@@ -276,7 +281,7 @@ The grid in `permission-matrix.ts` places every code in a module and action. App
 | `approvals` | Approver Inbox | `approval.act` | | | | `approval.act` (both) | | `approval.act_on_behalf` | |
 | `hr_queue` | HR Approved Queue | `hr.queue` | `vacancy.create` | `hr.assign_coordinator` | | | | | |
 | `recruitment` | Vacancies & Job Posts | `vacancy.view` | `vacancy.create_direct` | `vacancy.edit` | | | | `recruitment.view_all` | `jobpost.edit` |
-| `candidates` | Candidates (CV Bank) | `candidate.view` | `cv.upload` | `candidate.edit` | | `selection.shortlist` (approve only) | `report.export` | `candidate.duplicate_review` | `cv.download`, `screening.run`, `selection.override` |
+| `candidates` | Candidates (CV Bank) | `candidate.view` | `cv.upload` | `candidate.edit` | | `selection.shortlist` (approve only) | `report.export` | `candidate.duplicate_review` | `cv.download`, `screening.run`, `selection.override`, `candidate.delete` |
 | `interviews` | Interviews / Exam / Viva | | `evaluation.import` | `evaluation.marks` | | `selection.final_decision` (approve only) | | `evaluation.overwrite` | `evaluation.attendance` |
 | `email` | Recruitment Email & Templates | | | | `email.send` | | | `email.manage_template` | |
 | `joining` | Joining | `joining.view` | | | | `joining.approve` (approve only) | | | `joining.view_joined` |
@@ -284,7 +289,8 @@ The grid in `permission-matrix.ts` places every code in a module and action. App
 | `users` | Users & Roles | | | | | | | `admin.users` | |
 | `approval_config` | Approval Configuration | | | | | | | `approval.configure_route` | |
 | `monitor` | Processing Monitor | `monitor.view` | | `monitor.retry` | | | | | |
-| `audit` | Audit Log | `audit.view` | | | | | | | |
+| `audit` | Logs | `audit.view` | | | | | | | |
+| `reports` | Reports & Analytics | `report.view` | | | | | | | |
 
 ### 5.4 Department scope (Access Scope)
 
@@ -347,7 +353,7 @@ These differences are deliberate, confirmed by the owner on 2026-10-29. Do not "
 | Plain HR | **Only assigned vacancies**; the full CV bank and unassigned vacancies are for HR Manager / Super Admin |
 | Other coordinators' records may be reached if "an authorized Admin intervenes" | Only `recruitment.view_all` holders see them |
 | New requisition for HR: "Authorized" | Not in the HR default role; grant individually |
-| Audit Log for HR: "Authorized view" | HR Manager only by default |
+| Audit Log for HR: "Authorized view" | HR Manager only by default. Labelled **Logs** in the UI (owner, 2026-11-09) — the permission code `audit.view` and the catalogue entity (audit entries) are unchanged |
 | Processing Monitor for HR: "Authorized operational view" | `monitor.view` for HR; retry (`monitor.retry`) for HR Manager. The **screen was removed** (owner, 2026-11-04); the API and these codes remain, with no page using them |
 
 **Recruitment is coordinator-only** (owner, 2026-11-04): a vacancy, its job posts, CV scan, CVs and CV Bank are seen only by its coordinator,
@@ -417,6 +423,15 @@ reference, present and proposed salary, current and revised quota for department
 **Cancel:** from Draft, Returned or Pending, by the requester holding `requisition.cancel`, or by a holder of `approval.configure_route`. Reason of
 at least 3 characters. Open actions become `Superseded`.
 
+**Delete** (owner, 2026-11-08): Super Admin only (`requisition.manage_all`), any status, from the Delete button on the requisition list or the HR Approved Queue (shared `DeleteRequisitionDialog`), with a
+reason of at least 3 characters. It removes the requisition with its approval history and attachments and, when a vacancy was made from it,
+**everything made from it** (owner's choice "Delete everything"): the vacancy, its job posts and criteria, applications, CV documents and text,
+extraction and screening runs, remarks, stages, marks, imports, emails and their batches, the vacancy's own email templates, joining records,
+intake mails filed to it, background jobs and notifications pointing at them. Candidates left with no other application are deleted; a candidate
+who applied elsewhere is kept (a pending duplicate review pointing at a deleted candidate is cleared). Stored files are erased after the commit.
+Past audit entries stay; one `requisition.delete` entry records the reason, the counts and the vacancy number. The list shows the dialog with the
+vacancy number and application count (`vacancy` on list rows, only for `requisition.manage_all`).
+
 **Route edits** apply to future submissions; in-flight approvals keep their assigned approvers. Only one active route per department or as default.
 Every step needs an active named account.
 
@@ -456,7 +471,8 @@ method: `Email CV with subject "Application for <designation> - <department>"`. 
 and mails that tie between identical open posts go to Unmatched CVs. Migration `1793300000012` rewrote only untouched old defaults.
 
 **What a new job post starts with** (owner, 2026-11-05; `jobPostPrefill()` in `vacancies.service.ts`): from the requisition, *Min Edu. Qualification* →
-`education`, *Experience* → `experienceRequirement`, *JD of this position* → `duties` (Key responsibilities), *Skills* → `skills` (one per line). A Direct HR
+`education`, *Experience* → `experienceRequirement`, *Key Responsibilities* (`jobDescription`, labelled "JD of this position" until 2026-11-08) → `duties`, *Required Skills* → `skills`
+(one per line: a sentence stays whole, a line of short comma items such as "MS Excel, AutoCAD" is split; `requirementLines()`). A Direct HR
 vacancy gives only its Skills. Whatever the request sends wins. The other *Specialization required* fields (screening education, minimum years, other
 requirements) never go on a post. `GET job-posts/:id` returns no requisition or `screening` block, only `prefill` with those four values: a **Draft** post
 opened by someone with `jobpost.edit` shows them in the fields it left empty, with a note to check and Save (nothing is saved until Save).
@@ -486,31 +502,75 @@ and the logo. Drafts are **not** marked on the PDF or text (the page shows the s
    **Mail scan:** HR saves mails as `.eml` files. `POST /intake/scan-files` takes a folder picked in the browser (`webkitdirectory`, sent 20 mails per request; the files stay on the user's PC). `POST /intake/scan` reads the server folder `MAIL_INTAKE_DIR` (`backend/mail-inbox/`), up to 200 mails per scan, and moves each to `processed/` or `failed/`; nothing is deleted. Each subject goes through `candidates/subject-match.ts`: a Published post of an open vacancy matches on **position name from the circular plus department** (name or code), or the circular's custom subject. The longest position wins, so "Sr. Executive" beats "Executive". Company, then Job ID, only separate ties. Anything still unclear becomes `Unmatched` for manual assignment; ARS never guesses. The scan and the unmatched list live on **CV Bank → Unmatched CVs** (`/cv-bank/unmatched`); the separate "Mail folder / Unmatched CVs" menu item and `/intake` page were removed (owner, 2026-11-04). There HR selects mails and either **moves** them (department → designation → vacancy, when several open vacancies share both; one `POST intake/:id/assign` per mail) or **deletes** them permanently (`DELETE intake/:id`: only `Unmatched` / `Failed`, 409 otherwise; erases the row and the stored `intake` copies; applications already made from it keep their own CV copy; audited as `intake.delete` with subject, sender and file names; scanning the same mail again brings it back). `Message-ID` (or the file's SHA-256) stops a mail being imported twice. Only attachments with allowed CV extensions count, so photos and logos are skipped. The candidate's email comes from the CV, not the mail sender, because mails are often forwarded by HR or a job portal. `receivedAt` is the mail's date.
 2. Each accepted file creates a new `Candidate`, `Application`, `CandidateDocument` and an `EXTRACTION` job. The application attaches to the latest Published
    post, else the latest post. The **same file twice for one vacancy is refused** (SHA-256).
-3. **Extraction** (`rules-2.0`, rewritten 2026-11-05 against real CVs: Bdjobs exports, two-column designed CVs, labelled HR CVs): deterministic rules over text
-   from txt, pdf or docx. `.doc` and text-less (scanned) files fail for manual review.
+3. **Extraction** (`rules-2.2`, version stored on each extraction run; rewritten 2026-11-05 against real CVs: Bdjobs exports, two-column designed CVs, labelled HR CVs; tuned 2026-11-08 against the owner's
+   26 sample CVs in HR, Fashion Designing and Accounts & Finance): deterministic rules over text from txt, pdf, docx or doc. Text-less (scanned) files fail for
+   manual review, and so does a PDF whose text comes out as control codes (fonts with no character map, `assertReadable()`: more than 30% junk characters).
+   - **Word .doc** (owner, 2026-11-09; `word-extractor`): a ".doc" is read as what it really is (`common/file-kind.ts` `docKind`): Word 97-2003 (OLE) through
+     `word-extractor` (headers, body, text boxes, footnotes; table cells become tabs), a renamed DOCX through mammoth, RTF (`rtfToText`) and a web page saved as
+     .doc (`htmlToText`, common in job-site downloads). Upload refuses a ".doc" that is none of these (a renamed program). Checked on the 3 sample .doc CVs in
+     *Production & IE* (2 OLE, 1 web page): names, email, phone, education and experience read. With it, "Self Profile" / "Career Profile" are headings, a line
+     with two or more lower-case words is never a name, closing lines ("Thanking You", "Yours faithfully") are never a name, and when the top has no name the
+     last lines (the signature, "A.M. Haider ( Khokon )") are tried. The 26 earlier sample CVs read the same as before.
    - **PDF reading** (`pdf-layout.ts`): uses the positions of the text (pdf.js bundled in `pdf-parse`, through its `load()`; falls back to plain `getText()`).
      A page with a vertical gutter whose sides do not share baselines is read left column first (a narrow strip of side headings is not a column).
      Tables with a known header (Exam Title / Concentration/Major / Institute / Result / Pass.Year, Training Title / Topic / ..., Certification / From / To,
      Language / Reading / ...) become one line per row: `Exam Title: BSc | Institute: X | Result: CGPA 3.1 (out of 4) | Pass.Year: 2017`. Rows start at the
-     year (or From) cell; wrapped cells are joined. The biggest text near the top of page 1 is passed as `nameHint`.
+     year (or From) cell; wrapped cells are joined. A header label written on two lines ("Exam" over "Title", "Pass" over "Year") is joined, and becomes a column
+     of its own when no column sits under it. The biggest text near the top of page 1 is passed as `nameHint`.
    - **Sections**: the text is cut at known headings (also "Heading: text", "Heading<tab>text", letter-spaced "S K I L L S"). Lines under References are ignored for
      email, phone, address, name and jobs. A Bdjobs "Job Title:" at the top is the post applied for, never a job held.
-   - `name`: nameHint, else a "Name:" label (not Father's / Mother's / referee), else the first name-like line. `phone`: first Bangladeshi mobile, stored as `01XXXXXXXXX`.
+   - Bullets: the usual marks, emoji ticks and the private-use symbols of Wingdings / Symbol fonts (U+E000-U+F8FF, "" in Word CVs) are stripped everywhere;
+     a cell is split at tabs and at " | ". Page footers like "Name ‐3 | P a g e" are dropped.
+   - `name`: nameHint, else a "Name:" label (not Father's / Mother's / referee), else the first name-like line; "Resume of" / "CV of" and a nickname in brackets are dropped. `phone`: first Bangladeshi mobile, stored as `01XXXXXXXXX`.
    - Education: rows or degree lines (in the education section; anywhere when there is none) each with their own subject, institute, result and year. `degree` is the
      highest **finished** one (an enrolled / appeared PGD or master does not replace a finished bachelor; a running bachelor counts when nothing higher is finished).
      `cgpa` / `cgpaRaw` / `institution` / `specialization` belong to that degree (no longer the first CGPA in the file, which was often the HSC GPA out of 5).
      Bdjobs junk majors ("Degree", "Madrasa") are not subjects. `education` lists up to 5 entries.
+     Since 2026-11-08: a degree may follow a bullet, a year or "2017|", or a label ("Graduation : BBA"); "MS Office" / "MS Excel" are not an MS; common misspellings
+     ("Higher Secoundary") and P.U.C. / S.S.L.C. count. Sentences ("MBA in HRM from X University with CGPA 2.74 out of 4 in 2019", "PGDHRM under AIUB") and
+     "Degree – Institute" give the institute; labels "Name of the University :", "Institute:" are stripped and "Major: / Subject: / Group:" give the subject. A trailing
+     year is cut from the degree ("Masters of Laws (LL.M) 2019"); "MBA (Accounting)" gives the subject. "In progress" counts as unfinished. With an empty education
+     heading, degree cells anywhere (for example a column beside Certifications) are read, and those cells are left out of the certifications.
    - Experience: `totalExperienceYears` prefers "Total ... experience: N" over "N years of experience" in a summary. Jobs come from Bdjobs entries
      ("1. Title (N yrs)" + date line + company), else labelled Designation/Job Position + Company pairs, else date-range lines in the experience section split into
      title and organization by word lists. `lastPosition` / `workplace` are the first job; `previousJobs` lists all, one per line.
+     Since 2026-11-08: dates like "May’25", "to till now", "to Continue", "May 26" and the hyphens ‐ ‑ −; "Key Responsibilities:", "Key Achievements:" and
+     "Heading: text" lines inside the experience section stay in it; a company written above "Designation:" or above the date line, and a "Title | Company" line above
+     the dates, are used; "Full-time", "Onshore", "[Duration:" and bare places ("Dhaka, Bangladesh") are not title or company; "Position Held:" is a title label.
    - `skills`: the skills section items, plus Bdjobs "Area of Expertise" values; the Bdjobs HTML description is dropped when a bullet list exists.
      `certifications`: training / certification table rows as "Title (Institute, Year)", or the section's lines with wrapped lines joined.
    - `address`: present / mailing / "Present:" / "Address:" label, else the unlabelled address between the name and the phone (Bdjobs header) or a contact block at
      the top, else the permanent address. `age`: an "Age:" label, else worked out from a written date of birth on the day of extraction (14 to 80 only).
    - Tests: `test/cv-extraction.spec.ts` uses made-up people in these layouts; the real CVs are personal data and are not in the repo.
-   CVs already in the database keep the values from the old extractor until they are processed again; nothing re-extracts them automatically.
+     On the 26 samples (2026-11-08) filled fields went from: degree 16 → 24, last position 17 → 23, workplace 13 → 19, previous jobs 18 → 23, address 18 → 22;
+     one wrong name ("Dhaka.") fixed; one CV (fonts without a character map) now fails for manual review instead of extracting nothing. Still weak: letter-spaced
+     names ("U M M E Y ..." loses its word gaps), jobs in free two-column portfolios, and a degree with no degree word ("Fashion Design and Information Technology").
+   - Since 2026-11-08 (second pass): each job keeps its dates ("Title, Company (Feb 2024 – Present)" in `previousJobs`); when the CV states no total experience,
+     `totalExperienceYears` is added up from the jobs' dates (`yearsFromJobs()`: overlapping jobs once, internships not counted, a bare year counts from mid-year,
+     "Present" is today), the same kind of derived value as the age. A birth date of month and year only ("Aug 1990") gives the age; with no Bangladeshi
+     mobile, an international number near the top ("+971...", "+91...") is the phone; all 64 districts and common Dhaka / Gazipur areas count as address places.
+   - **Re-read CVs** (owner, 2026-11-08): `POST vacancies/:id/reread` (every application of the vacancy with a stored CV) and `POST applications/:id/reread`,
+     `@screening.run` with vacancy / application scope; buttons "Re-read CVs" on the vacancy's Candidates tab and "Re-read CV" on the application. Each queues a new
+     `EXTRACTION` job with the current extractor, then screening runs again (`runById` carried through). Earlier extraction and screening runs stay; fields a person
+     corrected stay. The candidate's name, email and phone: an empty one is filled; one read earlier is replaced by the new reading unless a person corrected it
+     (`name` / `email` / `phone` now go into `correctedFields` when corrected) or the candidate has other applications (merged). Audited as `cv.reread`.
+     Before this, a wrong name such as "Dhaka." stayed for ever, because extraction only filled empty candidate fields.
+   - Fixed 2026-11-08: a correction of one field also marked every other optional field as corrected (the DTO carries them as undefined); only fields sent count now.
+   CVs already in the database keep the values from the old extractor until they are read again with "Re-read CVs".
+   - **CV files are not kept** (owner, 2026-11-08): once a CV has been read, its text (reading order, as the extractor saw it) and the PDF's name hint go into
+     `candidate_documents.textContent` / `nameHint`, the file is deleted and `storageKey` becomes null (`fileRemovedAt` set). The row keeps the file's name, type,
+     size and SHA-256, so the same file is still refused twice and duplicates are still found. Screening and "Re-read CVs" use the kept text (so a later change to the
+     PDF layout reader does not reach CVs already read). A CV that could not be read keeps its file, so HR can open it and type the data; saving a correction on it
+     deletes the file. `GET documents/:id` answers 404 "not kept" for a removed file. The application page shows "CV text" instead of the PDF; the CV Bank shows
+     "CV text" (a link to the application) instead of Preview / Download. A mail's copy of an attachment is deleted once its application is made. On the `ars`
+     database all 51 stored CVs were read again this way on 2026-11-08 and every CV file was deleted (owner's confirmation), including 3 files no record used.
+   - Education subjects also match common abbreviations both ways (`SUBJECT_ALIASES` in `screening.engine.ts`: HRM, CSE, EEE, ECE, AIS, MIS, IPE, FDT, ICT, CE, ME;
+     "and" / "&" ignored), and "PGDHRM" gives the subject HRM.
+   - **Full screening test with the sample CVs** (2026-11-08, scratchpad `screening-full.js` on `ars_test`): three requisitions (HR, Fashion Designing,
+     Accounts & Finance) with Key Responsibilities and Specialization required, approvals, vacancy, job post, upload of the 26 PDFs, worker, ranking, file removal,
+     CV Bank Excel and Re-read CVs: 48 of 48 checks passed.
    None of address, certifications, previousJobs, skills, lastPosition, specialization is a core field.
-   Values only if literally present. CGPA is normalised only on an explicit /4 scale or a value ≤ 4 with no scale. Missing core fields (name, email, phone, degree,
+   Values only if literally present (the age and, without a stated total, the years of experience are worked out from written dates). CGPA is normalised only on an explicit /4 scale or a value ≤ 4 with no scale. Missing core fields (name, email, phone, degree,
    cgpa, total experience) give `Partial` / `Review Required`. `relevantExperienceYears` is never extracted, only entered by correction. Fields a human corrected are
    never overwritten.
 4. **Duplicate detection:** same normalised email, same phone (last 10 digits) or identical file on another candidate sets `duplicateReview = PENDING` with evidence. HR
@@ -521,17 +581,29 @@ and the logo. Drafts are **not** marked on the PDF or text (the page shows the s
    HR changes those by hand (form only; the API does not copy them). Of these, only Skills goes on a job post (see §6.5):
    - **Education / Qualification** (`requiredEducation`, operator `education`): alternatives on separate lines, ";" or " or " (one is enough). Each passes when the CV's
      highest degree (degree field or education list, `degreeRank` from the extractor) is at that level or higher, a named degree ("BSc", "MBA", with full names such as
-     "Bachelor of Science") is on the CV unless the CV holds a higher degree, and the subject ("in X", split on "/" "," " or "; "any ..." means none) is written in the CV.
+     "Bachelor of Science") is on the CV, and the subject ("in X", split on "/" "," " or "; "any ..." means none) is written. **All three must be in ONE finished
+     education entry** (owner, 2026-11-08): the degree field with its subject, or one item of the education list. Jobs, companies, training and the rest of the CV do not
+     count ("textile" in a job at a textile mill made any BSc pass "BSc in Textile"). Only a master's or above (MSc, MPhil, PhD) in the subject stands in for a named bachelor;
+     a PGD or diploma never does. Entries marked Enrolled, Appeared, Running, Pursuing and the like (`INCOMPLETE` in the extractor) do not count, and the reason says so.
+     With no degree named ("Textile background"), the words must be in the education (the CV text only when no education was read). A subject word matches at a word start,
+     so "Textile" also matches "Textiles".
    - **Minimum experience (years)** (`requiredExperienceYears`, operator `min_years`): HR's `relevantExperienceYears` if entered, else `totalExperienceYears`.
-   - **Skills** (`requiredSkills`) and **Other requirements** (the old `specialization` column, so earlier wording keeps working): split on commas, semicolons and new
+   - **Other requirements** (the old `specialization` column, so earlier wording keeps working): split on commas, semicolons and new
      lines; each item is a mandatory `mentions` criterion searched for, as whole words with dots and punctuation ignored ("B.Sc." = "BSc", "Full-Stack" = "full stack"), in the
      CV's full text plus the extracted or corrected fields.
-   - The **JD** is roles and responsibilities only and is not used for screening.
-   **All met → Pass; anything not found or short (a lower degree, fewer years) → Review Required with the reason; never Fail** (owner, 2026-11-05). The UI shows the
-   `Missing` outcome as "Review". The run stores `basis = 'REQUISITION'` with the requisition version
-   (or `'VACANCY'` with the vacancy's `specializationVersion`) as `criteriaVersion`, and no criteria set; the CV text is not copied into the run. Without the
-   field, CVs are not screened (job `Partial`). Corrections and "Re-run screening" queue new runs; old runs, including older `JOB_POST` ones, stay.
-   Corrections and "rescreen" queue new runs; old runs stay.
+   - **Required Skills** (`requiredSkills`, labelled "Skills" until 2026-11-08) and **Key Responsibilities** (the requisition's `jobDescription`; Direct HR vacancies have none)
+     make up the **match score** (owner, 2026-11-08; `screening/keywords.ts`, `screenRequirements()`; no AI model or paid service). Each line (`requirementLines()`) is cut into
+     its specific words (`keywordsOf()`: filler such as "good", "knowledge", "ensure", "degree" dropped; upper-case acronyms kept, and IT / AS / US and the like must be in capitals
+     in the CV). A word is found when the CV has it, two CV words joined ("team work" = "teamwork"), or a word sharing at least 4 letters and 60% of the longer word
+     ("networking" = "network", but "soft" is not "software"). A line scores the share of its words found; a short line written exactly ("MS Excel") scores 1; a line with no
+     specific words ("Willingness to learn ...") is not scored. Each line is a non-mandatory `keywords` result (shown as Scored: Pass / Partly / Not found).
+   - **Match score** 0-100: Required Skills 50, Key Responsibilities 30, education 10 (met or not), experience 10 (CV years / required, at most 1). A part with nothing set is
+     left out and the rest scale up to 100. It is a mandatory `score` result (`match-score`), stored as `screening_runs.score` / `scoreParts` and `applications.screeningScore`.
+   **Pass = match score ≥ 70 (`PASS_MARK`) and education, minimum experience and every other requirement met; anything else → Review Required with the reasons;
+   never Fail** (owner, 2026-11-05, kept 2026-11-08). The UI shows the
+   `Missing` outcome as "Review". Lists show only the must-have and score reasons. The run stores `basis = 'REQUISITION'` with the requisition version
+   (or `'VACANCY'` with the vacancy's `specializationVersion`) as `criteriaVersion`, and no criteria set; the CV text is not copied into the run. With none of these
+   fields and no Key Responsibilities, CVs are not screened (job `Partial`). Applications screened before 2026-11-08 have no score until screening is re-run. Corrections and "Re-run screening" queue new runs; old runs, including older `JOB_POST` ones, stay.
 
 Screening result (`screen()`, shared with the older job post criteria):
 
@@ -539,7 +611,8 @@ Screening result (`screen()`, shared with the older job post criteria):
 - Otherwise **Review Required** if a mandatory criterion is missing or unreadable with policy `REVIEW`.
 - Otherwise **Pass**. Policy `IGNORE` and preferred criteria never decide the result.
 
-Default list order: Pass, Review Required, Fail, not screened, then CGPA descending.
+Default list order (vacancy candidates and the export): Pass, Review Required, Fail, not screened, then match score descending, then CGPA descending. "Sort: Match score" ranks
+by score alone. The CV Bank's "x / y requirements" counts only the must-haves and the score (all results for old `JOB_POST` runs).
 
 ### 6.7 Shortlist, invitation, evaluation, decision
 
@@ -549,26 +622,33 @@ Default list order: Pass, Review Required, Fail, not screened, then CGPA descend
   duration, attendance) to both rows whenever either is changed, so they never differ; a result, and marks, stay per exam. No stage rows are created at
   shortlisting (that would turn the derived status into Interview). Attendance needs `evaluation.attendance`; schedule, location and result need `evaluation.marks` or `selection.shortlist`.
   Missing attendance stays `Not Recorded`, never Present.
-- **Interview Board** (`/interviews`, owner 2026-11-04) replaces the vacancy page's "Interview / exam / results" tab, which was removed. It lists shortlisted
-  applications, and any with a round on record, across every vacancy the user coordinates; HR Manager and Super Admin see all (`recruitment.view_all`).
-  Views: **Schedule (date-wise)**, a Saturday-start week strip with per-day counts, the day's slots in time order (from–to, round, candidate, department ·
-  designation · vacancy, venue, panel, attendance, result, marks) and an Upcoming list; **Candidates by department & designation**, grouped per vacancy, with
-  each round's slot, a computed *next step* (schedule → attend → result → final decision → joining) and the final decision. Work from the board: schedule or
-  reschedule many at once (`POST interviews/schedule`, any vacancy, **shortlisted only**), manage one slot (time, duration, venue, panel, attendance, marks,
-  result), final decision, invitation and result emails, Excel marks import. The page loads the whole board once and filters it in the browser (department,
-  designation, vacancy, exam, search by name / ID / phone), so the dropdowns always keep every choice; the API still accepts `departmentId`, `vacancyId` and `q`.
-  **Finished candidates are hidden** unless "Show finished" is ticked (2026-11-05): joined, rejected at joining, Not Selected, or of a Filled / Closed vacancy
-  unless still Selected and waiting to join. One slot per candidate for the written & interview day, one for the optional exam.
-  Each stage has `panel` (free text) and `durationMinutes` (5–600). **A round starts only with a date, an attendance or a result** (2026-11-05): a slot dialog saved
-  with only venue, panel or duration creates no stage row (it used to, which turned the CV Bank status into Interview). Dates in the past get a warning, not a block.
-  The **final decision** dropdown opens a confirmation dialog (attendance and marks, optional remarks, and a warning when the candidate would leave Joining Pending
-  and lose its planned date and letter status) instead of saving at once.
-  **Two Excel uploads** (owner, 2026-11-05): *Written & interview marks*, one sheet for both exams, and *Optional exam marks*. In the dialog HR picks department →
-  designation → vacancy (the vacancy is chosen by itself when only one matches), downloads the template already listing that vacancy's shortlisted candidates, fills
-  in marks and uploads it.
+- **Interview page** (`/interviews`; rebuilt at the owner's request on 2026-11-09 because the earlier Interview Board was hard to follow). It lists shortlisted
+  applications, and any with a round on record, across every vacancy the user coordinates; HR Manager and Super Admin see all (`recruitment.view_all`). Shortlisting
+  stays on the vacancy's Candidates tab. At the top: a **vacancy picker** (all vacancies, or one; chosen by itself when only one), search, an **Interview date** picker with a Today button (2026-11-09: only candidates whose written & interview day is that date, in all three steps), and **Show finished**
+  (joined, rejected at joining, or marked Not Selected). A Filled or Closed vacancy by itself no longer hides a shortlisted candidate (owner, 2026-11-09): remaining shortlisted
+  candidates on a filled vacancy may still be interviewed as backups, decided out by hand, or kept on hold, and are hidden only once they themselves are terminal. Then **three steps**, each with a "to do" count:
+  1. **Schedule**: candidates without a written & interview day first, then by date; tick (or select all) → *Set interview date & time* (`POST interviews/schedule`,
+     one slot for both exams, shortlisted only) or *Email invitation*; clicking a date opens the single-candidate slot dialog (time, duration, venue, panel, attendance, marks).
+  2. **Attendance & marks**: a sheet-like grid (`components/interviews/MarksGrid.tsx`): attendance select per row (`PUT applications/:id/stages/INTERVIEW`, needs a
+     scheduled day) and Written / Interview marks typed into cells. Since 2026-11-09 (owner) changes stay on screen, highlighted, until **Save changes (n)** sends them
+     (`PUT applications/:id/marks`, component `Total`; attendance through the stage route) or **Discard** drops them; cells refused keep what was typed, in red,
+     with the reason; leaving step 2 or the page with changes not saved asks first. Enter and the arrow keys move down / up; each header has an "out of" sent as `maxMarks`; a total column; an **Expected salary** column (owner, 2026-11-09: the CV value, corrected here, saved with Save changes through `PATCH applications/:id` `@candidate.edit`, max 60 characters; changing only the expected salary or age re-runs no screening; also shown in step 3); an Optional exam column only when a candidate in view has one. A mark
+     cannot be emptied from the grid. *Download Excel* / *Upload Excel* (one vacancy chosen) use the written & interview sheet, which now carries the marks already entered.
+  3. **Select for joining**: lists To decide / Sent to joining / **Waiting** / Not selected / All, highest total first; tick or select all → *Send to joining* (one planned joining date,
+     `POST applications/send-to-joining`), *Send to Waiting* (owner, 2026-11-09: a backup pool for candidates kept aside in case a selected one does not join; uses the existing
+     `finalDecision = 'On Hold'` under the hood, labelled Waiting in the tab and badge (amber), "Send to waiting" on the button), *Not selected*, *Move back to To decide* (final decision Pending;
+     a pending joining record is removed), *Email result*. From Waiting, tick and *Send to joining* when a slot opens. Refused candidates stay ticked and are listed.
+  **Remove** (owner, 2026-11-09), for a candidate brought in by mistake, moves them back one stage (`POST interviews/move-back` `@selection.shortlist`,
+  `{ applicationIds, to }`, per candidate with the coordinator scope): step 1 *Remove from interview* (`to: screening`) takes them off the shortlist and off the
+  Interview page; step 2 *Remove (back to Schedule)* (`to: schedule`) keeps them shortlisted. Both delete the candidate's stage rows (date, venue, attendance,
+  results) and marks, copied into the audit entry (`interview.remove_to_screening|remove_to_schedule`). Refused while a final decision is recorded or after
+  joining. Step 3 *Remove decision* sets the final decision back to Pending (a pending joining record and its planned date go). Joining Pending has
+  *Back to interview* per row and for ticked rows: the same final decision Pending, back to step 3 To decide; marks are kept.
+  The week calendar, the per-row final decision dropdown and the separate "Marks from Excel" card of the old board were removed. A round starts only with a date, an
+  attendance or a result (2026-11-05). Each stage has `panel` and `durationMinutes` (5–600). Dates in the past get a warning, not a block.
 - **Marks** per application / stage / component (default `Total`), with evaluator. Changing another evaluator's mark needs `evaluation.overwrite`. **No weighted total exists.**
 - **Excel marks import:** template download; `.xlsx` only; needs an Application ID or Candidate ID column and a Marks column; never matches on name or row order. Preview flags
-  unmatched, duplicate, invalid and over-maximum rows and saves nothing. Confirm saves valid rows, cannot apply twice, and overwrites need both `allowOverwrite` and `evaluation.overwrite`.
+  unmatched, duplicate, invalid and over-maximum rows and saves nothing. Confirm saves valid rows (since 2026-11-09 a row repeating the mark already on record unchanged is skipped, so a downloaded sheet can be uploaded back), cannot apply twice, and overwrites need both `allowOverwrite` and `evaluation.overwrite`.
   **Written & interview sheet** (`stageType=MAIN` template, `POST vacancies/:id/marks-import-main`): columns Application ID, Candidate ID, Candidate Name, Written Marks,
   Interview Marks, Remarks (the file is named `<vacancy>_<department>_<designation>_written_interview_marks.xlsx`). One upload makes one ordinary preview batch per exam
   (each with its own maximum), which the dialog confirms together. A blank cell means that mark is not entered yet and is left out, not an error. The Remarks column is not imported.
@@ -582,7 +662,7 @@ Placeholders: `candidateName`, `candidateId`, `applicationId`, `position`, `depa
 `result`, `joiningDate`, `reportingTime`, `contactPerson`. Dates display in Asia/Dhaka.
 
 Preview shows each recipient and message; recipients with no valid email or a missing placeholder value are skipped and reported. Sending needs `confirmed: true` and a client `clientKey`; the same
-key cannot send twice. Each candidate gets a **separate email**. Delivery is a background job; transient SMTP errors retry automatically; only failed sends can be retried; a sent event is never sent again.
+key cannot send twice. Each candidate gets a **separate email**. Delivery is a background job; transient SMTP errors retry automatically; a sent event is never sent again. A send that fails for good is not retried from the UI (the retry endpoint went with the Emails tabs, owner 2026-11-08): it is audited `email.failed` and counted on the dashboard, and the email is sent again with the composer.
 Coordinators can email only their own vacancies' candidates. A sent joining letter sets `letterStatus = Sent` and nothing else.
 
 ### 6.9 Joining
@@ -598,6 +678,15 @@ blocking, when the date is in the future (see [§15](#15-open-business-questions
 vacancy equal its `headcount`, `approve` (and the CV Bank move to Joined, which calls it) is refused with 409, counted with the vacancy row locked so two approvals
 at once cannot both take the last seat; the page disables Approve for such rows and suggests rejecting or a new requisition. Selecting more candidates than seats
 is still allowed (a waiting list). The Rejected tab offers "Move back to pending" only while the final decision is still Selected.
+
+### 6.9b Reports & Analytics
+
+- **Reports & Analytics** (owner, 2026-11-09; `backend/src/reports/`, `/reports` on the frontend; `@report.view`): two pages feeding off live DB aggregates, each clamped to the user's coordinator scope (HR Manager / Super Admin see everything):
+  1. **Recruitment Dashboard** (`/reports`, `GET /reports/overview`, `GET /reports/trends?bucket=month`) — KPIs, horizontal funnel (CVs → Screened → Pass → Shortlisted → Interviewed → Selected → Waiting → Joined), conversion rates (pass %, shortlist %, interview %, selection %, join %, overall), vacancy / requisition counts, a monthly SVG trend line and the top five active vacancies by CV volume. The body lives in `frontend/src/app/(app)/reports/_body.tsx` as `RecruitmentDashboardBody`; the main dashboard (`/`) also renders it, gated on `recruitment.view_all` so only HR Manager and Super Admin see it there (owner, 2026-11-09).
+  2. **Recruitment Reports** (`/reports/reports`) — tabs: *By vacancy* (`/reports/vacancies`: one row per vacancy with CVs / shortlisted / selected / waiting / joined-of-headcount and days-open), *CV sources* (`/reports/sources`: Manual / Mail intake / CV Bank funnel + join rate), *Approval TAT* (`/reports/approval-tat`: decided per approver + step with avg hours, currently-pending with avg days waiting), *Screening quality* (`/reports/screening-quality`: Pass / Fail / Review split plus HR override count). *By department* was removed on 2026-11-10 (owner) — the rollup raised internal errors on seeded data and the same figures are reachable from "By vacancy" grouped on Department.
+- Every endpoint takes a period (`from`, `to` as `YYYY-MM-DD`, inclusive) plus optional `departmentId` / `vacancyId`; the shared `PeriodBar` at the top of each page offers 7d / 30d / 90d / YTD / All / Custom. The funnel and the trend chart are inline SVG drawn in `frontend/src/app/(app)/reports/_shared.tsx` (no chart library). Permission: `report.view`, granted by default to HR, HR Manager and Admin (migrations `1793300000017` + `1793300000018` for Super Admin); Super Admin also picks it up from the "all permissions" seed.
+- **Time-to-Hire removed** (owner, 2026-11-09, same day): the dedicated page, nav entry and `GET /reports/time-to-hire` endpoint were added and taken out again. No migration or data change was involved.
+- **Main dashboard (`/`) tidied** (owner, 2026-11-09): the "Processing issues" card (failed jobs / failed emails) and the "My recent activity" table were removed from the main dashboard; Recruitment Dashboard body (above) now sits in their place for `recruitment.view_all` holders. The `/dashboard` API still returns `failedJobs`, `failedEmails` and `recentActivity` — kept for future use, no page renders them now.
 
 ### 6.10 Derived application status (CV Bank)
 
@@ -618,6 +707,10 @@ Received → Screening.
 `POST /applications/:id/status` sends `fromStatus`; a mismatch is 409. It **calls the existing workflow actions**, so their permissions and validation apply, then writes `application.status_change`.
 Shortlisting from Fail and reversing Selected or Not Selected need a reason. Joined needs a joining date. Other applications of the same candidate are untouched.
 
+**CV operations on Filled / stale-Filled vacancies (owner, 2026-11-09):** earlier, three guards refused new CVs once a vacancy was `Closed` or `Filled` — manual upload (`candidates.service.uploadManual`), mail-intake subject matching (`mail-intake.service.openJobs`) and new job-post creation (`vacancies.service.createJobPost`). This broke the Waiting pool flow: Selected candidates who didn't join couldn't be backfilled because no new CVs could enter the vacancy. The CV-upload and mail-intake guards are removed outright (any status is accepted); the job-post guard is loosened to refuse only `Closed`. Joining-reject in `joining.service.move` also auto-reverts a vacancy from `Filled` → `Screening` when the approved joinings drop below headcount, so it no longer stays stuck. Migration `020-ReconcileFilledVacancies` reconciles any existing `Filled` rows whose approved joinings are below headcount (data that pre-dates this fix). Tests cover CV upload on a Filled vacancy and the reconciliation SQL.
+
+**Bulk delete from the CV bank (owner, 2026-11-09):** `POST /cv-bank/applications/delete` takes `{ ids, reason? }` and needs `candidate.delete` (SUPER_ADMIN by default). **Joined candidates are protected:** before any delete, the service queries for approved joining records on any application of the same candidates in the selection and, if any match, throws 409 with a list of the blocking applications — nothing is deleted. Otherwise it cascades for each selected application: candidate_documents (with stored files erased after commit), extraction_runs, screening_runs, candidate_remarks, candidate_stages, evaluation_marks, joining_records (pending ones only, since joined candidates are refused above), email_events (and empty email_batches), processing_jobs, notifications, and unlinks the application id from any intake_messages attachments. Candidates left with no other application are deleted too; a candidate who also applied elsewhere is kept. One `candidate.bulk_delete` audit entry records the counts and the reason. The CV Bank candidate table renders a checkbox per row for users with `candidate.delete` and a "Delete selected" button that opens the confirm dialog; rows whose derived status is `Joined` get a disabled checkbox with a tooltip, and the select-all only touches selectable rows. Selection is cleared on page or filter change.
+
 ---
 
 ## 7. Backend modules
@@ -630,7 +723,9 @@ Sign-in, sign-out, current user. Login is case-insensitive on email, refuses ina
 An unknown email is checked against a dummy hash, so it takes as long as a wrong password (no account discovery by timing). **Failed sign-ins** (security test, 2026-11-05;
 `auth.service.ts`): 5 wrong passwords for one email from one address (the first `X-Forwarded-For` entry, else the socket), or 20 from anywhere, within 15 minutes give 429
 "Too many failed sign-in attempts" until the window passes; a successful sign-in clears that address's count. Counted in memory per API instance; a restart clears it.
-Sets `ars_token` (httpOnly, sameSite lax, secure in production).
+Sets `ars_token` (httpOnly, sameSite lax, secure in production). **Sign-out ends the session** (security test, 2026-11-09): `POST auth/logout`
+sets `users.sessionsValidFrom` to now, so every token of that user issued before it is refused with 401 "Your session has ended", on every device;
+a missing or invalid token only clears the cookie. An administrator setting a new password does the same.
 
 `POST auth/login` (public), `POST auth/logout` (public), `GET auth/me`.
 
@@ -661,7 +756,7 @@ Department User - view only, Requisition Approver.
 
 ### master
 
-`GET master/lookups` (any signed-in user), `POST`/`PATCH master/companies`, `master/departments`, `master/positions` `@master.configure`, `GET master/quotas` `@quota.view`, `POST master/quotas` and `PATCH master/quotas/:id` `@quota.edit`.
+`GET master/lookups` (any signed-in user), `POST`/`PATCH master/companies`, `master/departments`, `master/positions` `@master.configure`, `GET master/quotas` `@quota.view`, `POST master/quotas`, `PATCH master/quotas/:id` and `DELETE master/quotas/:id` `@quota.edit`, each within the user's `quotas` scope (403 "This record belongs to another department."). Delete (owner, 2026-11-08) removes the row outright; nothing refers to a quota row by key (a quota-chart update finds or recreates it), and the figures go into the `quota.delete` audit entry. With the default roles only the Department role (own department) and Super Admin (every department) add, edit and delete; HR, HR Manager, Corporate HR and Read-only stay view-only (owner, 2026-11-08).
 `DELETE master/companies|departments|positions/:id` `@master.configure` (owner, 2026-11-04): only while nothing uses the record, otherwise 409 listing the uses (requisitions, vacancies, quota rows; for departments also users by `departmentId` or Access Scope, approval routes, permission templates). Audited as `<kind>.delete`. Records in use are retired with `active` instead.
 
 Quota rows: `positionId` null is the department total. Vacancy = quota − present (`computeVacancy`); a missing value gives "Not available", a negative gives "Needs review". On `PATCH`, changing `approvedQuota` needs `requisition.quota_chart`.
@@ -669,24 +764,24 @@ Quota rows: `positionId` null is the department total. Vacancy = quota − prese
 ### requisitions
 
 `RequisitionsController` (`requisitions`): `GET /` `@requisition.view`, `GET :id` (record check), `POST /` `@requisition.create`, `PUT :id` `@requisition.edit`, `POST :id/submit` `@requisition.submit`,
-`POST :id/approve|reject|return` `@approval.act`, `POST :id/cancel` and `POST :id/corporate-hr` (checked in service), `POST :id/attachments` `@requisition.edit`, `GET :id/attachments/:attId` (record check).
+`POST :id/approve|reject|return` `@approval.act`, `POST :id/delete` `@requisition.manage_all` (body `reason`), `POST :id/cancel` and `POST :id/corporate-hr` (checked in service), `POST :id/attachments` `@requisition.edit`, `GET :id/attachments/:attId` (record check).
 
-`ApprovalsController` (`approvals`): `GET inbox` `@approval.act`; `GET`/`POST routes`, `PUT routes/:id` `@approval.configure_route`. Routes have no delete.
+`ApprovalsController` (`approvals`): `GET inbox` `@approval.act` (`?decisions=asc` lists "My recent decisions" oldest first; default newest first; 50 rows); `GET`/`POST routes`, `PUT routes/:id` (no page uses them since the Approval Routes screen was removed, owner 2026-11-09; the configured route keeps working and is changed through the API or the database) `@approval.configure_route`. Routes have no delete.
 
 Inbox returns `pending` (my current steps), `upcoming` (my later steps, view only, with the current approver), `all` (every pending step, only with `approval.act_on_behalf`) and `history` (my last 50 decisions).
 
 ### vacancies
 
-`GET hr-queue` `@hr.queue`, `GET hr-queue/coordinators` `@hr.assign_coordinator`, `PUT hr-queue/:requisitionId/coordinator` `@hr.queue + hr.assign_coordinator`, `PUT vacancies/:id/coordinator` `@hr.assign_coordinator`,
+`GET hr-queue` `@hr.queue` (`approvedOn=YYYY-MM-DD` keeps requisitions whose final approval fell on that day in Bangladesh time; rows carry `vacancy` with its application count for the Delete dialog), `GET hr-queue/coordinators` `@hr.assign_coordinator`, `PUT hr-queue/:requisitionId/coordinator` `@hr.queue + hr.assign_coordinator`, `PUT vacancies/:id/coordinator` `@hr.assign_coordinator`,
 `POST hr-queue/:requisitionId/vacancy` `@vacancy.create`, `POST vacancies/direct` `@vacancy.create_direct`, `GET vacancies`, `GET vacancies/:id` `@vacancy.view`, `PUT vacancies/:id` `@vacancy.edit`,
-`POST vacancies/:id/job-posts`, `PUT job-posts/:id`, `POST job-posts/:id/status|circular` `@jobpost.edit`, `GET job-posts/:id`, `GET job-posts/:id/circular`, `GET job-posts/:id/circular-file` `@vacancy.view`. `GET vacancies/:id` and `GET job-posts/:id` return `screening: { source: 'REQUISITION' | 'VACANCY', reqNo, specialization, items }`. `PUT vacancies/:id` changes only the fields sent.
+`POST vacancies/:id/job-posts`, `PUT job-posts/:id`, `POST job-posts/:id/status|circular` `@jobpost.edit`, `DELETE job-posts/:id` `@jobpost.edit` + coordinator scope (owner, 2026-11-08: the vacancy's HR coordinator, the HR Manager and the Super Admin; any status). Delete keeps the candidates: their applications belong to the vacancy and only get `jobPostId` null; the post's screening criteria sets, notifications linking to it and its uploaded circular file go; mails sent later with its subject are no longer matched to it. Audited `jobpost.delete` with the number of applications unlinked. `GET job-posts/:id`, `GET job-posts/:id/circular`, `GET job-posts/:id/circular-file` `@vacancy.view`. `GET vacancies/:id` and `GET job-posts/:id` return `screening: { source: 'REQUISITION' | 'VACANCY', reqNo, specialization, items }`. `PUT vacancies/:id` changes only the fields sent.
 
 ### candidates
 
-`POST vacancies/:id/cvs` `@cv.upload`, `GET vacancies/:id/applications` `@candidate.view`, `POST vacancies/:id/rescreen` `@screening.run`, `POST vacancies/:id/shortlist` `@selection.shortlist`, `GET vacancies/:id/export` `@report.export`,
+`POST vacancies/:id/cvs` `@cv.upload`, `GET vacancies/:id/applications` `@candidate.view`, `POST vacancies/:id/rescreen` `@screening.run`, `POST vacancies/:id/reread` and `POST applications/:id/reread` `@screening.run` (read the stored CVs again), `POST vacancies/:id/shortlist` `@selection.shortlist`, `GET vacancies/:id/export` `@report.export`,
 `GET applications/:id`, `POST applications/:id/remarks`, `GET applications/:id/jobs` `@candidate.view`, `PATCH applications/:id` `@candidate.edit`, `POST applications/:id/duplicate` `@candidate.duplicate_review`, `GET documents/:id` `@cv.download`,
 `GET intake/unmatched`, `POST intake/:id/assign`, `DELETE intake/:id`, `GET intake/mail-folder`, `POST intake/scan`, `POST intake/scan-files` `@cv.upload + recruitment.view_all`.
-`GET vacancies/:id/cv-data-export` `@report.export`: one Excel per vacancy in the layout of HR's "New CV data bank" sheet, CV columns only, built on request so corrections are included. After the 14 sheet columns come ADDRESS, SKILLS, PREVIOUS JOBS & DESIGNATIONS, CERTIFICATIONS, EXPECTED SALARY, AGE. `GET vacancies/:id/cv-data` `@candidate.view` returns the same columns and rows as JSON for "View Excel" (not audited; the download is). The older `GET vacancies/:id/export` (with screening columns) is unchanged. `mail-intake.service.ts` reads the mails.
+`GET vacancies/:id/cv-data-export` `@report.export`: the **CV Bank Excel**, one per vacancy in the layout of HR's "New CV data bank" sheet, built on request so corrections are included. Since 2026-11-08 (owner) it holds the CV data and the screening data together: APPLICATION ID, CANDIDATE ID, the HR sheet columns, ADDRESS, SKILLS, PREVIOUS JOBS & DESIGNATIONS, CERTIFICATIONS, EXPECTED SALARY, AGE, then INSTITUTION, CGPA, ALL EDUCATION, SCREENING RESULT, MATCH SCORE (%), SCREENING REASONS (must-haves and score), SHORTLISTED, FINAL DECISION, HR REMARKS (30 columns). `GET vacancies/:id/cv-data` `@candidate.view` returns the same columns and rows as JSON for "View Excel" (not audited; the download is). The older `GET vacancies/:id/export` (with screening columns) is unchanged. `mail-intake.service.ts` reads the mails.
 
 Excel summary columns: Candidate ID, Application ID, Candidate Name, Education, Institution, CGPA, Work Experience, Workplace, Email, Phone, Applied Position, Screening Status, Screening Reasons, Remarks. One row per application. Missing name, email or phone
 shows "Needs review". Exports are audited.
@@ -698,21 +793,21 @@ shows "Needs review". Exports are audited.
 ### evaluation
 
 `GET interviews/board?departmentId&vacancyId&q` `@candidate.view` (coordinator scope in the query), `POST interviews/schedule` `@selection.shortlist` (+ `assertApplicationsAccess`), `GET vacancies/:id/evaluation` `@candidate.view` (no screen uses it now), `POST vacancies/:id/schedule` `@selection.shortlist`, both schedule routes refuse applications that are not shortlisted, `PUT applications/:id/stages/:stage` (checked in service), `PUT applications/:id/marks` `@evaluation.marks`,
-`POST applications/:id/final-decision` `@selection.final_decision`, `GET vacancies/:id/marks-template?stageType=WRITTEN|INTERVIEW|OPTIONAL|MAIN`, `POST vacancies/:id/marks-import`, `POST vacancies/:id/marks-import-main?writtenMaxMarks&interviewMaxMarks` (returns `{ batches }`), `GET imports/:id`, `POST imports/:id/confirm|cancel` `@evaluation.import`.
+`POST applications/:id/final-decision` `@selection.final_decision`, `POST applications/send-to-joining` `@selection.final_decision + joining.approve` (owner, 2026-11-08: `{ applicationIds, joiningDate }`; per candidate the coordinator scope, then final decision Selected if not already (needs shortlisted) and the planned joining date on the pending joining record, audited `joining.update`; already joined or rejected at joining is refused; one failure does not stop the rest; returns `sent`, `failed`, `results`), `GET vacancies/:id/marks-template?stageType=WRITTEN|INTERVIEW|OPTIONAL|MAIN`, `POST vacancies/:id/marks-import`, `POST vacancies/:id/marks-import-main?writtenMaxMarks&interviewMaxMarks` (returns `{ batches }`), `GET imports/:id`, `POST imports/:id/confirm|cancel` `@evaluation.import`.
 
 ### email
 
-`GET email/placeholders` (signed-in), `GET email/templates`, `POST email/preview`, `POST email/send`, `POST email/events/:id/retry`, `GET email/history` `@email.send`, `POST email/templates`, `PUT email/templates/:id`, `DELETE email/templates/:id` `@email.manage_template`. Delete removes the template and its versions (audited `template.delete`); sent emails keep their own subject and body, so their `templateId` may no longer resolve.
+`GET email/placeholders` (signed-in), `GET email/templates`, `POST email/preview`, `POST email/send` `@email.send` (`GET email/history` and `POST email/events/:id/retry` removed 2026-11-08 with the Emails tabs), `POST email/templates`, `PUT email/templates/:id`, `DELETE email/templates/:id` `@email.manage_template`. Delete removes the template and its versions (audited `template.delete`); sent emails keep their own subject and body, so their `templateId` may no longer resolve.
 
 ### joining
 
-`GET joining/pending`, `GET joining/rejected` `@joining.view` (rows include `headcount`, `joinedCount`, `vacancyStatus`), `GET joining/joined` `@joining.view_joined`, `PUT joining/:id`, `POST joining/:id/approve|reject|reopen` `@joining.approve`.
+`GET joining/pending`, `GET joining/rejected` `@joining.view` (rows include `headcount`, `joinedCount`, `vacancyStatus`), `GET joining/joined` `@joining.view_joined`, `PUT joining/:id`, `POST joining/:id/approve|reject|reopen` `@joining.approve`. `POST joining/approve-batch` `@joining.approve` (owner, 2026-11-08): `{ ids, joiningDate, remarks? }`, up to 200; each record gets the coordinator scope check and the single approval (Selected, headcount seats, vacancy Filled at the last seat) in its own transaction, so one failure does not stop the rest; returns `approved`, `failed` and per-record `results`.
 
 Scope order in `JoiningService.scope`: `recruitment.view_all` sees everything; else `vacancy.view` holders see their coordinated vacancies; else the `joining` department scope applies. Contact details are returned only with `candidate.view`.
 
 ### processing
 
-`JobsService`: types `EXTRACTION`, `SCREENING`, `EMAIL_SEND`; statuses `Queued`, `Processing`, `Completed`, `Partial`, `Failed`. Jobs are claimed with `FOR UPDATE SKIP LOCKED`, so several API instances are safe. Up to 25 jobs per tick, every `WORKER_INTERVAL_MS`.
+`JobsService`: types `EXTRACTION`, `SCREENING`, `EMAIL_SEND`; statuses `Queued`, `Processing`, `Completed`, `Partial`, `Failed`. Jobs are claimed with `FOR UPDATE SKIP LOCKED`, so several API instances are safe. Every `WORKER_INTERVAL_MS` a tick starts `WORKER_CONCURRENCY` lanes (default 4, 1–16) that keep claiming jobs until the queue is empty (load test, 2026-11-09: it used to stop after 25 jobs and wait for the next tick, so 3,000 CVs uploaded at once took about 20 minutes). Saving a candidate's extracted email / phone and the duplicate check take a transaction advisory lock (`ars:candidate-duplicates`), so two CVs of the same person read side by side are still flagged.
 `enqueue` reuses an active job for the same type and record. Only `RetryableError` retries automatically (3 attempts, growing delay). **Handlers must be idempotent.**
 
 `GET monitor/jobs` `@monitor.view`, `POST monitor/jobs/:id/retry` `@monitor.retry`.
@@ -747,7 +842,7 @@ From the SRS and acceptance tests. Each is enforced server-side today.
 9. Duplicate candidates are flagged, never merged automatically. (SRS 9.4)
 10. Marks are matched by ID, never by name or row order, and saved only after confirmation. (AC-20)
 11. Missing attendance is not Present. (SRS 13.3)
-12. Each candidate gets a separate email; no shared To/CC. Bulk send needs preview and confirmation. Only failed sends retry. (AC-19, SRS 12.4)
+12. Each candidate gets a separate email; no shared To/CC. Bulk send needs preview and confirmation. A sent email is never sent again; a failed one is sent again with the composer (retry endpoint removed 2026-11-08). (AC-19, SRS 12.4)
 13. An interview pass or a sent email never marks someone joined. Only HR approval does. (AC-23)
 14. Display IDs never change with status; a Candidate ID identifies a person, an Application ID one vacancy application. (SRS 2.1)
 15. Sensitive changes are audited with actor, record and old/new values. Audit rows are never edited by the application. (AC-25)
@@ -766,7 +861,7 @@ From the SRS and acceptance tests. Each is enforced server-side today.
 | Table | Key columns | Constraints and notes |
 | --- | --- | --- |
 | `roles` | code, name, description, permissions[], active | code unique |
-| `users` | name, email, passwordHash, designation, active, departmentId, extraPermissions[], deniedPermissions[], departmentScopes (jsonb), lastLoginAt, deletedAt | email unique **where `deletedAt` IS NULL**; passwordHash not selected by default |
+| `users` | name, email, passwordHash, designation, active, departmentId, extraPermissions[], deniedPermissions[], departmentScopes (jsonb), lastLoginAt, sessionsValidFrom, deletedAt | email unique **where `deletedAt` IS NULL**; passwordHash not selected by default |
 | `user_roles` | userId, roleId | many-to-many |
 | `permission_templates` | name, description, permissions[], departmentScopes | name unique |
 | `permission_settings` | kind, key, label, description, disabled | (kind, key) unique; no row = defaults |
@@ -798,10 +893,10 @@ From the SRS and acceptance tests. Each is enforced server-side today.
 | `screening_criteria_sets` | jobPostId, version, note, createdById | (jobPost, version) unique; no longer written, kept for old runs |
 | `screening_criteria` | setId, sortOrder, label, field, operator, value, mandatory, missingPolicy | cascade |
 | `candidates` | candidateNo, name, email, emailNormalized, phone, phoneNormalized, mergedIntoId | candidateNo unique |
-| `applications` | applicationNo, candidateId, vacancyId, jobPostId, source, receivedAt, processing fields, duplicate fields, extracted fields (incl. address, certifications, previousJobs), extractionStatus, correctedFields[], screeningResult, latestScreeningRunId, shortlist fields, final decision fields | applicationNo unique; (candidate, vacancy) unique |
-| `candidate_documents` | applicationId, candidateId, storageKey, originalName, mimeType, size, sha256, source, uploadedById | cascade on application |
+| `applications` | applicationNo, candidateId, vacancyId, jobPostId, source, receivedAt, processing fields, duplicate fields, extracted fields (incl. address, certifications, previousJobs), extractionStatus, correctedFields[], screeningResult, screeningScore, latestScreeningRunId, shortlist fields, final decision fields | applicationNo unique; (candidate, vacancy) unique |
+| `candidate_documents` | applicationId, candidateId, storageKey (null once the file is removed), textContent, nameHint, fileRemovedAt, originalName, mimeType, size, sha256, source, uploadedById | cascade on application |
 | `extraction_runs` | applicationId, documentId, status, extracted (jsonb), missingFields[], error, processorVersion, completedAt | history |
-| `screening_runs` | applicationId, basis (`JOB_POST` / `REQUISITION` / `VACANCY`), criteriaSetId (null unless `JOB_POST`), criteriaVersion, overallResult, results (jsonb), inputs (jsonb), runById | history |
+| `screening_runs` | applicationId, basis (`JOB_POST` / `REQUISITION` / `VACANCY`), criteriaSetId (null unless `JOB_POST`), criteriaVersion, overallResult, results (jsonb), inputs (jsonb), runById, score, scoreParts (jsonb) | history |
 | `candidate_remarks` | applicationId, candidateId, text, authorId | |
 | `candidate_stages` | applicationId, stageType, scheduledAt, location, panel, durationMinutes, attendance, result, updatedById | (application, stage) unique |
 | `evaluation_marks` | applicationId, stageType, component, marks, maxMarks, evaluatorId, remarks, importBatchId | (application, stage, component) unique |
@@ -811,7 +906,7 @@ From the SRS and acceptance tests. Each is enforced server-side today.
 | `email_template_versions` | templateId, version, subject, body, createdById | (template, version) unique |
 | `email_batches` | clientKey, kind, templateId, templateVersion, vacancyId, createdById, total | clientKey unique |
 | `email_events` | batchId, applicationId, kind, recipient, subject, body, template refs, status, transport, providerRef, error, attempts, sentAt, createdById | (batch, application) unique |
-| `joining_records` | applicationId, joiningDate, status, letterStatus, remarks, approvedById, approvedAt | applicationId unique |
+| `joining_records` | applicationId, joiningDate, status, letterStatus, salary, remarks, approvedById, approvedAt | applicationId unique |
 | `intake_messages` | messageId, sender, subject, receivedAt, status, vacancyId, attachments (jsonb), error | messageId unique |
 
 ### System (`system.entities.ts`)
@@ -848,41 +943,44 @@ Many ID columns have no database foreign key (for example `latestScreeningRunId`
 | `1793300000010-ExamRoundsAndJoiningRejected` | `VIVA` → `OPTIONAL` in stages, marks and import batches; joining `Did Not Join` → `Rejected` |
 | `1793300000011-StructuredSpecialization` | requisitions and vacancies: `requiredEducation`, `requiredSkills` text, `requiredExperienceYears` numeric(4,1); `specialization` stays as "Other requirements" |
 | `1793300000012-CvMethodWithoutJobId` | job posts whose CV method was still the old default with the job ID get the designation - department default |
+| `1793300000013-ScreeningMatchScore` | `screening_runs.score`, `scoreParts`; `applications.screeningScore` |
+| `1793300000014-CvTextWithoutFile` | `candidate_documents.storageKey` nullable; `textContent`, `nameHint`, `fileRemovedAt` |
+| `1793300000015-SessionsValidFrom` | `users.sessionsValidFrom` (tokens issued before it are refused) |
+| `1793300000016-JoiningSalary` | `joining_records.salary` (varchar 100) |
 
 Never edit an applied migration; add a new one. `synchronize` is off.
 
 ### Stored files
 
-`STORAGE_DIR/<folder>/<YYYY-MM>/<uuid>.<ext>`, folders `cvs`, `intake`, `requisitions`, `approvals`, `circulars`, plus `outbox/`. Back up with the database. Paths are checked to stay inside the storage root.
+`STORAGE_DIR/<folder>/<YYYY-MM>/<uuid>.<ext>`, folders `cvs` (only CVs not read yet or that could not be read), `intake` (mails not yet assigned), `requisitions`, `approvals`, `circulars`, plus `outbox/`. Back up with the database. Paths are checked to stay inside the storage root.
 
 ---
 
 ## 10. Frontend
 
-`frontend/src/app/(app)/` is wrapped by `components/Shell.tsx`: sidebar filtered by permission (sections Overview, Manpower, Recruitment ending with Joining Pending, Joined Candidates, All CVs / Candidate CV Bank; Predefined Fields; Administration with Users & Roles, Approval Routes, Audit Log), notification bell polling every 30 seconds, redirect to `/login?next=...` when signed out.
+`frontend/src/app/(app)/` is wrapped by `components/Shell.tsx`: sidebar filtered by permission (sections Overview, Manpower, Recruitment ending with Joining Pending, Joined Candidates, All CVs / Candidate CV Bank; Predefined Fields; Administration with Users & Roles and Audit Log; the Approval Routes screen was removed on 2026-11-09), notification bell polling every 30 seconds, redirect to `/login?next=...` when signed out. Login page (2026-11-08): split screen, a blue brand panel with the logo, tagline and three feature lines on wide screens, and the sign-in form (email and password with icons, show / hide password, Caps Lock warning, "ask your ARS administrator" for a forgotten password) on the right; on phones the logo sits above the form card. The Ananta logo (`frontend/public/ananta-logo.png`, from the owner, 2026-11-08) stands at the top of the sidebar header and, larger, on the sign-in page.
 
 | Route | Screen | Sidebar permission |
 | --- | --- | --- |
 | `/login` | Sign in | none |
 | `/` | Dashboard (Department, HR, Admin sections) | none |
-| `/quotas` | Positions & Quota | `quota.view` |
-| `/requisitions`, `/requisitions/new`, `/requisitions/[id]`, `/requisitions/[id]/edit`, `/requisitions/[id]/print` | List, form, detail (read-only for approvers: no Approve / Return / Reject, only a link to the inbox), Print/PDF | `requisition.view` |
-| `/approvals` | Approver Inbox | `approval.act` |
-| `/approvals/[id]` | The requisition with the Approve / Return / Reject card: the **only** place decisions are taken in the UI (owner, 2026-11-05); `components/RequisitionDetail.tsx` with `inbox` | `approval.act` |
-| `/hr-queue` | HR Approved Queue with Coordinator column; default All approved | `hr.queue` |
-| `/vacancies`, `/vacancies/[id]` | List with Coordinator select and Direct HR vacancy form (with Coordinator); tabs Overview & job posts, Candidates & screening (CV folder scan, single-file upload, screening basis; table without Application and Processing columns, with previous jobs, skills, certifications, address, expected salary, age), Emails | `vacancy.view` |
-| `/interviews` | Interview Board: date-wise schedule and department → designation view of shortlisted candidates | `candidate.view` |
-| `/job-posts/[id]` | Circular & requirements, Hiring circular card (the Screening card was removed, owner 2026-11-05; the vacancy page shows what CVs are screened against) | reached from a vacancy |
-| `/applications/[id]` | Candidate profile with CV preview, corrections, remarks, history | reached from lists |
+| `/quotas` | Positions & Quota; Add quota row, Edit and Delete (with confirmation) for `quota.edit`. Dept-total rows are listed above designation rows per department (owner, 2026-11-09). Approving a joining raises `presentManpower` by one on the dept-total row and (if present) the matching designation row; reverting a joining drops them back — audited as `quota.auto_update` | `quota.view` |
+| `/requisitions`, `/requisitions/new`, `/requisitions/[id]`, `/requisitions/[id]/edit`, `/requisitions/[id]/print` | List (Delete for the Super Admin), form, detail (read-only for approvers: no Approve / Return / Reject, only a link to the inbox; the "HR recruitment" card with the vacancy link / Create vacancy was removed on 2026-11-08 and `GET requisitions/:id` no longer returns `vacancy`; vacancies are made from the HR Approved Queue and opened from Vacancies), Print/PDF | `requisition.view` |
+| `/approvals` | Approver Inbox. Since 2026-11-08 (owner) Approve and Reject buttons on each row of "All pending approvals" and "Waiting for your decision" open the same dialog as the requisition page (remarks or reason, optional supporting document; the step's `actionId` is sent). Return for clarification stays on the requisition. "My recent decisions" has a Newest first / Oldest first select | `approval.act` |
+| `/approvals/[id]` | The requisition with the Approve / Return / Reject card: the only place to Return, and with the inbox rows the only places decisions are taken (owner, 2026-11-05; inbox Approve / Reject added 2026-11-08); `components/RequisitionDetail.tsx` with `inbox` | `approval.act` |
+| `/hr-queue` | HR Approved Queue with Coordinator column; default All approved. Since 2026-11-08 (owner): an "Approved on" date picker, no vacancy number under the requisition (Create vacancy stays for requisitions without one), and Delete for the Super Admin | `hr.queue` |
+| `/vacancies`, `/vacancies/[id]` | List with Coordinator select, a Status select for `vacancy.edit` (owner, 2026-11-08; `PUT vacancies/:id` with the coordinator scope) and Direct HR vacancy form (with Coordinator). `GET vacancies` lists Closed vacancies last, newest first within each group (owner, 2026-11-08); tabs Overview & job posts, Candidates & screening (CV folder scan, single-file upload, screening basis; table without Application and Processing columns, with previous jobs, skills, certifications, address, expected salary, age). The Emails tab was removed (owner, 2026-11-08). The Overview was redesigned (owner, 2026-11-09): a facts strip (company, department, type, approved headcount, coordinator as text, created; direct entry reason and remarks below), then a **Screening requirements** card (education, minimum experience, required skills as chips, Key Responsibilities as bullets, other requirements; Edit for Direct HR vacancies) beside **Job posts / circulars** (title and number, window, status, PDF / Text, Delete; an empty state). No Source row; the coordinator is changed from the Vacancies list or the HR Approved Queue | `vacancy.view` |
+| `/interviews` | Interview: vacancy picker and three steps (1 Schedule, 2 Attendance & marks grid with Excel download / upload, 3 Select for joining with Send to joining / Not selected), owner 2026-11-09 | `candidate.view` |
+| `/job-posts/[id]` | Circular & requirements, Hiring circular card, Delete (with confirmation; also on each row of the vacancy's job post list) for `jobpost.edit` (the Screening card was removed, owner 2026-11-05; the vacancy page shows what CVs are screened against) | reached from a vacancy |
+| `/applications/[id]` | Candidate profile with tabs Profile & CV, Screening, Marks & decision (CV text, corrections, remarks). The Emails and Activity tabs were removed (owner, 2026-11-08); the application detail no longer returns `emails` or `history`, and the actions remain in the Audit Log | reached from lists |
 | `/cv-bank` | All CVs / Candidate CV Bank: departments, and search across all CVs | `candidate.view` |
 | `/cv-bank/[departmentId]` | Vacancies of one department | `candidate.view` |
 | `/cv-bank/[departmentId]/[vacancyId]` | CVs of one vacancy, Download CV data Excel, View Excel | `candidate.view` |
 | `/cv-bank/[departmentId]/[vacancyId]/excel` | The CV data sheet in the browser, searchable | `candidate.view` |
 | `/cv-bank/unmatched` | Unmatched CVs: mail folder scan (browser folder or server folder), select, move by department and designation, delete permanently. Linked from the bottom of `/cv-bank` with a count; no sidebar item | `cv.upload` + `recruitment.view_all` |
-| `/joining` | Joining Pending with Pending and Rejected tabs; approve, reject, move back to pending | `joining.view` |
+| `/joining` | Joining Pending with Pending and Rejected tabs; approve, reject, move back to pending. Pending also has a **Salary** column (owner, 2026-11-09: free text such as "45,000 per month", saved with its own Save button or Enter, Esc puts the saved value back; `PUT joining/:id` `{ salary }`, trimmed, empty clears it, audited `joining.update`; shown on Joined Candidates for recruitment users, hidden from department users like the contacts), a planned joining date filter, row checkboxes, "Select all shown" and "Join selected" with one actual joining date for all (owner, 2026-11-08); rows whose vacancy is full cannot be ticked; refused ones are listed with the reason | `joining.view` |
 | `/joined` | Joined Candidates | `joining.view_joined` |
 | `/admin/users` | Users & Roles: tabs Users, Roles, Permissions, Permission Templates | `admin.users` |
-| `/admin/routes` | Approval Routes | `approval.configure_route` |
 | `/admin/master`, `/admin/templates` | Sidebar section **Predefined Fields**: Master Data (companies, departments, positions; add, edit, deactivate, delete) and Email Templates (edit, delete) | `master.configure`, `email.manage_template` |
 | `/admin/audit` | Audit Log | `audit.view` |
 
@@ -900,9 +998,9 @@ The owner chose to **keep the current visual design**; the Users & Roles mockup 
 **Notification events:** `approval.pending` (next approver), `approval.submitted` (holders of `approval.act_on_behalf`), `requisition.approved`, `requisition.rejected`, `requisition.returned` (requester), `hr.queue` (holders of `hr.queue`), `coordinator.assigned`,
 `import.completed` (uploader), `joining.pending` (holders of `joining.approve`), `joining.approved` (vacancy creator).
 
-**Audit actions:** `requisition.create|edit|submit|resubmit|approve_step|approve_final|sent_to_hr|reject|return|cancel|corporate_hr|attachment_add`, `quota.create|update|revise_from_requisition`, `companies.*`, `departments.*`, `positions.create|update`, `approval_route.create|update`,
-`vacancy.create_from_requisition|create_direct|update|status_change`, `coordinator.assign|reassign`, `jobpost.create|update|status_change|circular_attach`, `criteria.new_version` (older records only), `cv.upload_batch`, `screening.rerun`, `application.correct|remark|status_change`, `candidate.correct|merge|keep_separate`,
-`selection.shortlist|shortlist_override|unshortlist|final_decision`, `stage.<type>.update`, `marks.enter|edit|import_preview|import_confirm|import_cancel`, `report.candidate_export`, `email.send_batch|sent|failed|retry`, `template.create|update`, `joining.update|approve|reject|reopen` (`joining.did_not_join` on older records), `intake.assign`, `intake.scan`, `intake.delete`, `report.cv_data_export`, `job.retry`,
+**Audit actions:** `requisition.create|edit|submit|resubmit|approve_step|approve_final|sent_to_hr|reject|return|cancel|corporate_hr|attachment_add|delete`, `quota.create|update|delete|revise_from_requisition`, `companies.*`, `departments.*`, `positions.create|update`, `approval_route.create|update`,
+`vacancy.create_from_requisition|create_direct|update|status_change`, `coordinator.assign|reassign`, `jobpost.create|update|status_change|circular_attach|delete`, `criteria.new_version` (older records only), `cv.upload_batch`, `cv.reread`, `screening.rerun`, `application.correct|remark|status_change`, `candidate.correct|merge|keep_separate`,
+`selection.shortlist|shortlist_override|unshortlist|final_decision`, `stage.<type>.update`, `interview.remove_to_screening|remove_to_schedule`, `marks.enter|edit|import_preview|import_confirm|import_cancel`, `report.candidate_export`, `email.send_batch|sent|failed` (`email.retry` on older records), `template.create|update`, `joining.update|approve|reject|reopen` (`joining.did_not_join` on older records), `intake.assign`, `intake.scan`, `intake.delete`, `report.cv_data_export`, `job.retry`,
 `user.create|update|update_with_password_reset|delete|restore`, `role.create|update|delete`, `permission_template.create|update|delete`, `permission_setting.update|reset`, `module_setting.update|reset`.
 
 ---
@@ -912,11 +1010,12 @@ The owner chose to **keep the current visual design**; the Users & Roles mockup 
 `npm test` runs Jest with `--runInBand` against `ars_test`. **The end-to-end suite wipes that database** (`dropDatabase`), then migrates and seeds. Keep tests away from the `ars` database. The worker is disabled in tests; call `jobs.drain()` to process jobs.
 
 - `backend/test/rules.spec.ts`: screening engine, extraction, quota and form rules, email placeholders.
+- `backend/test/match-score.spec.ts`: requirement lines, keywords, word matching and the match score, using the owner's ICT Executive circular.
 - `backend/test/workflow.e2e-spec.ts`: the whole workflow over HTTP. Tests **run in order and share state** (`ids`), so a later test depends on earlier ones. Running one test with `-t` usually misleads.
   Covers AC-01 to AC-27, final approval, coordinators, Users & Roles, delete and restore, permission settings, the hiring circular.
 - AC-28 (backup/restore) is the manual README procedure.
 
-At the last full run (2026-11-05), 108 tests passed. Stop any other API pointed at `ars_test` before `npm test`: its background worker takes the test's jobs and
+At the last full run (2026-11-09), 144 tests passed. Stop any other API pointed at `ars_test` before `npm test`: its background worker takes the test's jobs and
 screening tests fail.
 
 **Production smoke, sanity and security pass (2026-11-05).** The compiled API (`NODE_ENV=production`) and `next build` / `next start` were run on `ars_test`
@@ -926,6 +1025,29 @@ pages in the browser. Security checks: every non-public route refuses anonymous 
 (applications, marks, stages, decisions, documents, exports, email preview); admin routes and self-promotion refused; no password hashes in responses; search fields
 parameterised; unknown body fields refused; renamed executables, HTML and SVG uploads refused; file names cannot leave storage; oversize uploads refused. Fixed from it:
 sign-in lockout, equal sign-in timing, security headers, empty slot rows. There are no automated frontend tests; verify screens in the browser.
+
+**Deployment-state test pass (2026-11-09, owner).** The `ars` database was emptied of all recruitment data at the owner's request ("Keep setup only",
+no backup): quota rows, requisitions with approvals and attachments, vacancies, job posts, candidates and applications with everything under them, joining,
+emails, notifications, the audit log, background jobs and ID counters went; users, roles, permission templates, companies, departments, positions, the
+approval route and the email templates stayed. Numbering restarts at 000001. All testing then ran on `ars_test` (compiled API with `NODE_ENV=production`
+on :4100, `next build` / `next start` on :3100), never on `ars`:
+- **Full workflow** as the seeded users, quota to joining (94 checks): quota add / edit / delete per department, requisition, five approvals from the inbox,
+  reject, quota chart, Super Admin delete (alone and with its vacancy and candidate), HR queue by approval date, coordinator, vacancy, job post publish / delete,
+  6 CVs (3 PDF, 3 TXT) read and screened, CV text kept and file not kept, CV Bank Excel, shortlist, Interview steps 1–3 (schedule, attendance, grid marks,
+  Excel download with marks and upload saving only changes, send to joining), joining batch with the seat limit, Filled, joined lists per role, vacancy list order.
+- **Security** (40 checks): every non-public route refuses anonymous callers; forged / alg=none / guessed-secret tokens refused; lockout; equal timing;
+  headers; no cross-coordinator access; read-only user cannot write; admin endpoints closed; no password hashes; injection; uploads. **Fixed:** signing out
+  now ends the token (`users.sessionsValidFrom`, `iatMs`).
+- **Role matrix** (137 checks): 10 roles × 13 screens plus read-only writes; the only refusals not in the role table are the seeded Read-only user's quota and
+  requisition lists, by design (no department, so "own department" means none).
+- **Load:** 10 coordinators each uploaded 300 CVs at the same time (3,000, half PDF) through the web proxy while 5 more users browsed: all accepted in 41 s
+  (batch of 20: p50 2.6 s, p95 3.7 s), all read and screened 42 s after the last upload, browsing p50 23 ms / p95 121 ms, no errors, names right on all
+  3,000, no coordinator saw another's vacancy. **Fixed:** the worker paused after every 25 jobs (about 20 minutes for 3,000 CVs); it now runs
+  `WORKER_CONCURRENCY` lanes until the queue is empty.
+- **Browser** (test copy): every main page renders; the Interview marks grid was fixed so a saved mark no longer disappears (the page rebuilt its row list
+  on every render) and Enter saves the cell itself.
+- **UI polish** (no flow changes): menu icons with an active marker, user initials in the header, slightly rounder cards and dialogs, row hover on every table,
+  focus rings on buttons.
 
 To check circular layout without data, from `backend/`: `npx ts-node scripts/sample-circular.ts <folder>`.
 
@@ -947,7 +1069,7 @@ To check circular layout without data, from `backend/`: `npx ts-node scripts/sam
 | Hide email and phone from department users on the joined list | Roles doc: contact data restricted to authorised roles |
 | Unmatched CVs only for `recruitment.view_all` | Coordinators may access only their vacancies; unmatched CVs have none (confirmed by the owner, 2026-11-04) |
 | Deleting an unmatched CV is permanent (row and file) | Owner, 2026-11-04; the audit entry stays |
-| One cross-vacancy Interview Board instead of a per-vacancy tab | Owner, 2026-11-04: coordinator-scoped; HR Manager and Super Admin see all |
+| One cross-vacancy Interview page instead of a per-vacancy tab | Owner, 2026-11-04: coordinator-scoped; HR Manager and Super Admin see all. Rebuilt as three steps with a vacancy picker on 2026-11-09 |
 | Soft delete for users | Owner, 2026-10-29: keep history, restorable, email reusable |
 | Permission codes fixed; labels, groups and on/off editable | Owner, 2026-10-29: a code created in the UI would protect nothing |
 | Backend and frontend are independent projects | Owner, 2026-10-29: match `D:\pos`; `.pgdata` and `storage` moved into `backend/` |
@@ -955,6 +1077,7 @@ To check circular layout without data, from `backend/`: `npx ts-node scripts/sam
 | No env file, example included, and no credential is ever committed | Owner, 2026-11-01: `.gitignore` covers `.env`, `.env.*` and database files; required settings are listed in the README without values |
 | Screening from the requisition's Specialization required (Direct HR vacancies: their own field); job post criteria removed; a missing item is Review Required, never Fail | Owner, 2026-11-04 |
 | Specialization required split into Education / Qualification, Skills, Minimum experience and Other requirements; JD is roles and responsibilities only; a shortfall is Review Required, never Fail | Owner, 2026-11-05 |
+| JD renamed Key Responsibilities, Skills renamed Required Skills; both scored by keywords (skills 50, responsibilities 30, education 10, experience 10), Pass at 70 with the must-haves met, still never Fail; candidates ranked by score | Owner, 2026-11-08 |
 | Recruitment coordinator-only; HR Manager and Super Admin see everything | Owner, 2026-11-04: CV Screener, Examiner and Read-only lost `recruitment.view_all` |
 | CV folder scan on the vacancy page puts every CV in the folder into that vacancy | Owner, 2026-11-04: HR collects CVs from any source into one folder per job |
 | `pdfkit` for the circular | Direct server-side PDF download |
@@ -977,12 +1100,12 @@ also edit requisitions moved to `requisition.manage_all`.
 - **Notifications** for new CVs, CV processing failures and requisition edits. `CandidatesService` injects `NotificationService` but does not use it. Email notifications for events do not exist; notifications are in-system only.
 - **Password change by the user themself.** Only an administrator can set a password.
 - **Delete** for approval routes. Routes have an `active` flag instead.
-- **Processing Monitor screen** (removed 2026-11-04). Failed CV jobs show their error in the vacancy's candidate list, and failed emails retry from the vacancy's Emails tab, but a failed CV job can no longer be retried from the UI.
+- **Processing Monitor screen** (removed 2026-11-04). Failed CV jobs show their error in the vacancy's candidate list, but a failed CV job can no longer be retried from the UI. Since 2026-11-08 failed emails have no retry either (both Emails tabs removed): they are sent again with the composer.
 
 ### Behaviour to be aware of
 
 - Two open jobs with the same position and department cannot be told apart from those alone. Such a mail goes to Unmatched unless its subject has the company or the Job ID. The circular's default subject has neither (owner, 2026-11-05).
-- Signing out only clears the cookie: the token itself stays valid until it expires (`JWT_EXPIRES_IN`, default 8h). Deactivating or deleting a user takes effect at once, because every request re-reads the account.
+- Signing out ends all of that user's sessions, not only the current browser's (2026-11-09). Deactivating or deleting a user takes effect at once, because every request re-reads the account.
 - The sign-in lockout is in memory, so with several API instances each counts on its own, and a restart clears it.
 - A `%` or `_` typed into a search box acts as a wildcard (it is matched with ILIKE). Not an injection, since values are parameterised.
 - `lastPosition`, `specialization`, `address`, `certifications` and `previousJobs` are read only when a CV is processed, so CVs received before each was added show it blank until corrected by hand.

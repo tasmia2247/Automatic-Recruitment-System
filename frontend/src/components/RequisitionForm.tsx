@@ -183,12 +183,20 @@ export function RequisitionForm({ initial }: { initial?: Form }) {
 
       <Card title="Position details">
         <div className="grid gap-4">
+          <Field label="Key Responsibilities" error={err('jobDescription')}
+            hint="One responsibility per line, as on the job post, e.g. Provide technical support to users and troubleshoot software/hardware/network issues. CVs are scored on the keywords of each line, and the lines go on the job post.">
+            <Textarea rows={5} value={f.jobDescription ?? ''} onChange={(e) => set('jobDescription', e.target.value)} />
+          </Field>
           <div>
             <div className="mb-2 text-sm font-semibold">Specialization required</div>
-            <p className="mb-3 text-xs text-muted">CVs for this position are screened against these fields. A CV passes when it meets all of them; otherwise it goes to Review Required for HR to check. Education and experience are filled in from Min Edu. Qualification and Experience above; you can change them. These fields are used only for screening and do not appear on the job post.</p>
+            <p className="mb-3 text-xs text-muted">
+              CVs for this position are screened against these fields and the Key Responsibilities. Each CV gets a match score: Required Skills 50%, Key Responsibilities 30%,
+              education 10% and experience 10%. A CV passes with a score of 70% or more when the education, minimum experience and other requirements are also met;
+              otherwise it goes to Review Required for HR to check, with the reasons. Education and experience are filled in from Min Edu. Qualification and Experience above; you can change them.
+              Required Skills also go on the job post; the other fields are used only for screening.
+            </p>
             <SpecializationFields value={f} onChange={set} errors={{ requiredEducation: err('requiredEducation'), requiredSkills: err('requiredSkills'), requiredExperienceYears: err('requiredExperienceYears'), specialization: err('specialization') }} />
           </div>
-          <Field label="JD of this position" hint="Roles and responsibilities of the job. Not used for screening."><Textarea rows={5} value={f.jobDescription ?? ''} onChange={(e) => set('jobDescription', e.target.value)} /></Field>
           <Field label="Background of the requirement" required error={err('background')}><Textarea rows={4} value={f.background ?? ''} onChange={(e) => set('background', e.target.value)} /></Field>
         </div>
       </Card>

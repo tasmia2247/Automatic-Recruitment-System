@@ -49,6 +49,8 @@ export const config = {
     from: env('MAIL_FROM', 'Ananta HR <hr@example.com>'),
   },
   workerIntervalMs: Number(env('WORKER_INTERVAL_MS', '3000')),
+  /** Jobs one API instance runs at the same time (load test, 2026-11-09: 10 coordinators × 300 CVs). */
+  workerConcurrency: Math.max(1, Math.min(16, Number(env('WORKER_CONCURRENCY', '4')) || 4)),
   workerEnabled: bool('WORKER_ENABLED', true),
   allowDirectHrVacancy: bool('ALLOW_DIRECT_HR_VACANCY', true),
   requisitionIdOn: env('REQUISITION_ID_ON', 'draft') as 'draft' | 'submit',

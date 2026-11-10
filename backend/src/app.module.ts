@@ -16,6 +16,7 @@ import { EvaluationModule } from './evaluation/evaluation.module';
 import { JoiningModule } from './joining/joining.module';
 import { MasterModule } from './master/master.module';
 import { ProcessingModule } from './processing/processing.module';
+import { ReportsModule } from './reports/reports.module';
 import { RequisitionsModule } from './requisitions/requisitions.module';
 import { SystemModule } from './system/system.module';
 import { VacanciesModule } from './vacancies/vacancies.module';
@@ -37,6 +38,7 @@ import { VacanciesModule } from './vacancies/vacancies.module';
     EvaluationModule,
     EmailModule,
     JoiningModule,
+    ReportsModule,
     SystemModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: AuthGuard }],

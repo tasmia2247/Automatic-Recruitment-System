@@ -75,6 +75,14 @@ export class RequisitionsController {
     return this.svc.returnForClarification(id, me, dto.reason, { actionId: dto.actionId, file });
   }
 
+  /** Super Admin only (`requisition.manage_all`): deletes the requisition and everything made from it (owner, 2026-11-08). */
+  @Post(':id/delete')
+  @HttpCode(200)
+  @RequirePerm(P.REQ_MANAGE_ALL)
+  remove(@Param('id', ParseUUIDPipe) id: string, @Body() dto: ReasonDto, @CurrentUser() me: AuthUser) {
+    return this.svc.remove(id, me, dto.reason);
+  }
+
   @Post(':id/cancel')
   @HttpCode(200)
   cancel(@Param('id', ParseUUIDPipe) id: string, @Body() dto: ReasonDto, @CurrentUser() me: AuthUser) {
@@ -113,8 +121,9 @@ export class ApprovalsController {
 
   @Get('inbox')
   @RequirePerm(P.APPROVAL_ACT)
-  inbox(@CurrentUser() me: AuthUser) {
-    return this.svc.inbox(me);
+  inbox(@CurrentUser() me: AuthUser, @Query('decisions') decisions?: string) {
+    // "My recent decisions" by date: newest first (default) or oldest first (owner, 2026-11-08).
+    return this.svc.inbox(me, decisions === 'asc' ? 'ASC' : 'DESC');
   }
 
   @Get('routes')

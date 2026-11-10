@@ -71,6 +71,13 @@ export class User extends BaseEntity {
   lastLoginAt: Date | null;
 
   /**
+   * Sign-in tokens issued before this moment are refused (security test, 2026-11-09): set on sign-out and when an administrator
+   * sets a new password, so a copied token stops working at once instead of living until it expires.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  sessionsValidFrom: Date | null;
+
+  /**
    * Set when an administrator deletes the account: it is hidden and can never sign in, but stays referenced by
    * requisitions, approvals and the audit log so history keeps the person's name. Cleared on restore.
    */

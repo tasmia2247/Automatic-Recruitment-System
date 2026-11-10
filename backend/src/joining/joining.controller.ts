@@ -6,7 +6,7 @@ import { DataSource } from 'typeorm';
 import { AuthUser, CurrentUser, RequirePerm } from '../common/auth';
 import { P } from '../common/permissions';
 import { assertJoiningAccess } from '../common/scope';
-import { ApproveDto, JoinedQuery, JoiningUpdateDto, ReasonDto } from './joining.dto';
+import { ApproveBatchDto, ApproveDto, JoinedQuery, JoiningUpdateDto, ReasonDto } from './joining.dto';
 import { JoiningService } from './joining.service';
 
 @Controller('joining')
@@ -36,6 +36,28 @@ export class JoiningController {
   async update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: JoiningUpdateDto, @CurrentUser() me: AuthUser) {
     await assertJoiningAccess(this.ds, me, id);
     return this.svc.update(id, dto, me);
+  }
+
+  /**
+   * Approves several pending joinings with one actual joining date (owner, 2026-11-08: pick a date, select all, join).
+   * Each candidate goes through the same checks as a single approval in its own transaction, so one that fails (another
+   * coordinator's vacancy, all seats filled, no longer Selected) does not stop the rest; the result lists each one.
+   */
+  @Post('approve-batch')
+  @HttpCode(200)
+  @RequirePerm(P.JOINING_APPROVE)
+  async approveBatch(@Body() dto: ApproveBatchDto, @CurrentUser() me: AuthUser) {
+    const results: { id: string; ok: boolean; error?: string; duplicate?: boolean }[] = [];
+    for (const id of [...new Set(dto.ids)]) {
+      try {
+        await assertJoiningAccess(this.ds, me, id);
+        const r = await this.svc.approve(id, { joiningDate: dto.joiningDate, remarks: dto.remarks }, me);
+        results.push({ id, ok: true, duplicate: r.duplicate });
+      } catch (e: any) {
+        results.push({ id, ok: false, error: e?.response?.message ?? e?.message ?? 'Failed.' });
+      }
+    }
+    return { approved: results.filter((r) => r.ok && !r.duplicate).length, failed: results.filter((r) => !r.ok).length, results };
   }
 
   @Post(':id/approve')

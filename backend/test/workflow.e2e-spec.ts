@@ -148,6 +148,26 @@ describe('Requisition and approval gate', () => {
     await (await as('viewer')).get('/api/dashboard').expect(200);
   });
 
+  it('quota rows are deleted only by their own department or the Super Admin (owner, 2026-11-08)', async () => {
+    const ict = await as('requester.ict');
+    const used = new Set((await ict.get('/api/master/quotas').expect(200)).body.filter((q: any) => q.companyId === ids.ho).map((q: any) => q.positionId));
+    const free = (await ict.get('/api/master/lookups').expect(200)).body.positions.filter((p: any) => !used.has(p.id)).map((p: any) => p.id);
+    const row = async (positionId: string) => (await ict.post('/api/master/quotas').send({ companyId: ids.ho, departmentId: ids.ict, positionId, approvedQuota: 3, presentManpower: 1 }).expect(201)).body.id;
+    const a = await row(free[0]);
+    const b = await row(free[1]);
+    await (await as('requester.admin')).delete(`/api/master/quotas/${a}`).expect(403); // another department
+    await (await as('recruiter')).delete(`/api/master/quotas/${a}`).expect(403); // HR: view only
+    await (await as('corporate.hr')).delete(`/api/master/quotas/${a}`).expect(403);
+    expect((await ict.delete(`/api/master/quotas/${a}`).expect(200)).body).toEqual({ deleted: true });
+    expect((await (await as('admin')).delete(`/api/master/quotas/${b}`).expect(200)).body).toEqual({ deleted: true });
+    await ict.delete(`/api/master/quotas/${b}`).expect(404);
+    const left = (await ict.get('/api/master/quotas').expect(200)).body.map((q: any) => q.id);
+    expect(left).not.toContain(a);
+    expect(left).not.toContain(b);
+    const [audit] = await ds.query(`SELECT "oldValues" FROM audit_events WHERE action = 'quota.delete' AND "entityId" = $1`, [a]);
+    expect(audit.oldValues).toMatchObject({ approvedQuota: 3, presentManpower: 1, departmentId: ids.ict });
+  });
+
   it('AC-24: department scope and permissions are enforced server-side', async () => {
     await (await as('requester.admin')).get(`/api/requisitions/${ids.req}`).expect(403);
     await (await as('requester.ict')).post(`/api/requisitions/${ids.req}/approve`).send({}).expect(403);
@@ -181,7 +201,7 @@ describe('Requisition and approval gate', () => {
     const req = await as('requester.ict');
     const notes = await req.get('/api/notifications').expect(200);
     expect(notes.body.items.some((n: any) => n.event === 'requisition.returned')).toBe(true);
-    await req.put(`/api/requisitions/${ids.req}`).send({ ...validForm(), jobDescription: 'Build and maintain ARS modules.' }).expect(200);
+    await req.put(`/api/requisitions/${ids.req}`).send({ ...validForm(), jobDescription: 'Develop software with Node.js.' }).expect(200);
     await req.post(`/api/requisitions/${ids.req}/submit`).expect(200);
     const d = await req.get(`/api/requisitions/${ids.req}`).expect(200);
     expect(d.body.version).toBe(2);
@@ -260,12 +280,13 @@ describe('Vacancy, job post, CV intake and screening', () => {
     const reqNo = (await hr.get(`/api/requisitions/${ids.req}`).expect(200)).body.reqNo;
     // The job post starts from the requisition's Min Edu. Qualification and Experience; the screening fields stay off it.
     const post = (await hr.get(`/api/job-posts/${ids.jobPost}`).expect(200)).body;
-    expect(post).toMatchObject({ education: 'B.Sc in CSE', experienceRequirement: '2 years', duties: 'Build and maintain ARS modules.', skills: null });
-    expect(post.prefill).toEqual({ education: 'B.Sc in CSE', experienceRequirement: '2 years', duties: 'Build and maintain ARS modules.' });
+    expect(post).toMatchObject({ education: 'B.Sc in CSE', experienceRequirement: '2 years', duties: 'Develop software with Node.js.', skills: null });
+    expect(post.prefill).toEqual({ education: 'B.Sc in CSE', experienceRequirement: '2 years', duties: 'Develop software with Node.js.' });
     expect(post.screening).toBeUndefined();
     expect(JSON.stringify(post)).not.toContain('TypeScript');
-    expect((await hr.get(`/api/vacancies/${ids.vacancy}`).expect(200)).body.screening).toMatchObject({ source: 'REQUISITION', reqNo, other: 'Computer Science, TypeScript' });
-    expect((await hr.get(`/api/vacancies/${ids.vacancy}`).expect(200)).body.screening.items).toEqual(['Computer Science', 'TypeScript']);
+    expect((await hr.get(`/api/vacancies/${ids.vacancy}`).expect(200)).body.screening).toMatchObject({ source: 'REQUISITION', reqNo, other: 'Computer Science, TypeScript', keyResponsibilities: 'Develop software with Node.js.',
+ });
+    expect((await hr.get(`/api/vacancies/${ids.vacancy}`).expect(200)).body.screening.items).toEqual(['Computer Science', 'TypeScript', 'Key Responsibilities (1 point)', 'match score at least 70%']);
   });
 
   it('manual upload: per-file results; bad file does not cancel good ones; same file twice is rejected', async () => {
@@ -278,22 +299,31 @@ describe('Vacancy, job post, CV intake and screening', () => {
     const again = await hr.post(`/api/vacancies/${ids.vacancy}/cvs`).attach('files', Buffer.from(CV_A), 'rahim-copy.txt').expect(201);
     expect(again.body[0]).toMatchObject({ ok: false, error: expect.stringMatching(/already received/) });
     [ids.appA, ids.appB, ids.appC] = res.body.slice(0, 3).map((r: any) => r.applicationId);
+    const files = (await ds.query(`SELECT "storageKey" FROM candidate_documents WHERE "applicationId" = ANY($1)`, [[ids.appA, ids.appB, ids.appC]])).map((r: any) => path.resolve(config.storageDir, r.storageKey));
+    expect(files.every((f: string) => fs.existsSync(f))).toBe(true);
     await jobs.drain();
+    expect(files.some((f: string) => fs.existsSync(f))).toBe(false); // read: the files are deleted, their text kept
+    // Read, so its file is gone (only the text is kept), and the same file is still refused.
+    const later = await hr.post(`/api/vacancies/${ids.vacancy}/cvs`).attach('files', Buffer.from(CV_A), 'rahim-again.txt').expect(201);
+    expect(later.body[0]).toMatchObject({ ok: false, error: expect.stringMatching(/already received/) });
   });
 
   it('AC-14/AC-15: extraction does not fabricate; screening checks every Specialization required item, with reasons', async () => {
     const hr = await as('recruiter');
     const list = await hr.get(`/api/vacancies/${ids.vacancy}/applications`).expect(200);
     const byId = Object.fromEntries(list.body.items.map((a: any) => [a.id, a]));
-    expect(byId[ids.appA]).toMatchObject({ screeningResult: 'Pass', cgpa: 3.45, totalExperienceYears: 3 });
+    expect(byId[ids.appA]).toMatchObject({ screeningResult: 'Pass', screeningScore: 100, cgpa: 3.45, totalExperienceYears: 3 });
     expect(byId[ids.appA].candidate).toMatchObject({ name: 'Rahim Uddin', email: 'rahim.uddin@example.com' });
     // Missing items send a CV to Review Required, never to Fail.
     expect(byId[ids.appB].screeningResult).toBe('Review Required');
-    expect(byId[ids.appB].screeningReasons).toEqual(['Computer Science: not found in CV - needs manual verification.', 'TypeScript: not found in CV - needs manual verification.']);
+    // The Key Responsibilities keywords (develop, software, node, js) make up the match score: B has only "developer".
+    expect(byId[ids.appB].screeningScore).toBe(25);
+    expect(byId[ids.appB].screeningReasons).toEqual(['Match score 25% is below the pass mark of 70% (Key Responsibilities 25% of 100) - needs review.',
+      'Computer Science: not found in CV - needs manual verification.', 'TypeScript: not found in CV - needs manual verification.']);
     expect(byId[ids.appC]).toMatchObject({ screeningResult: 'Review Required', cgpa: null, extractionStatus: 'Review Required' });
-    expect(byId[ids.appC].screeningReasons).toEqual(['TypeScript: not found in CV - needs manual verification.']);
+    expect(byId[ids.appC].screeningReasons).toEqual(['Match score 0% is below the pass mark of 70% (Key Responsibilities 0% of 100) - needs review.', 'TypeScript: not found in CV - needs manual verification.']);
     expect(byId[ids.appC].candidate.email).toBeNull();
-    expect(list.body.items.map((a: any) => a.id)).toEqual([ids.appA, ids.appB, ids.appC]); // Pass first, then Review by CGPA
+    expect(list.body.items.map((a: any) => a.id)).toEqual([ids.appA, ids.appB, ids.appC]); // Pass first, then Review by match score
   });
 
   it('AC-16: runs record the requisition they used; a correction re-screens and keeps the earlier run', async () => {
@@ -302,7 +332,7 @@ describe('Vacancy, job post, CV intake and screening', () => {
     expect(d.body.screeningRuns).toHaveLength(1);
     expect(d.body.screeningRuns[0]).toMatchObject({ basis: 'REQUISITION', criteriaSetId: null, criteriaVersion: 2, overallResult: 'Review Required' });
     expect(d.body.screeningRuns[0].inputs.cvText).toBeUndefined(); // the CV text itself is not copied into the run
-    await hr.patch(`/api/applications/${ids.appC}`).send({ skills: 'TypeScript, React' }).expect(200);
+    await hr.patch(`/api/applications/${ids.appC}`).send({ skills: 'TypeScript, React, Node.js software development' }).expect(200);
     await jobs.drain();
     const d2 = await hr.get(`/api/applications/${ids.appC}`).expect(200);
     expect(d2.body.screeningRuns.map((r: any) => r.overallResult)).toEqual(['Pass', 'Review Required']);
@@ -319,6 +349,32 @@ describe('Vacancy, job post, CV intake and screening', () => {
     expect((await hr.get(`/api/applications/${ids.appC}`)).body.remarks[0].text).toBe('সাক্ষাৎকারের জন্য উপযুক্ত');
     const audit = await (await as('admin')).get(`/api/audit?entityType=Candidate`).expect(200);
     expect(audit.body.items.some((e: any) => e.action === 'candidate.correct' && e.newValues.email === 'sadia.akter@example.com' && e.oldValues.email === null)).toBe(true);
+  });
+
+  it('"Re-read CVs" reads stored CVs again, keeps what a person corrected and screens again (owner, 2026-11-08)', async () => {
+    const hr = await as('recruiter');
+    await hr.patch(`/api/applications/${ids.appC}`).send({ name: 'Sadia A. Akter' }).expect(200);
+    const before = (await hr.get(`/api/applications/${ids.appC}`)).body;
+    expect(before.correctedFields).toEqual(expect.arrayContaining(['skills', 'email', 'name']));
+    expect((await hr.post(`/api/applications/${ids.appC}/reread`).expect(200)).body).toEqual({ queued: 1 });
+    await jobs.drain();
+    const after = (await hr.get(`/api/applications/${ids.appC}`)).body;
+    expect(after.extractionRuns).toHaveLength(before.extractionRuns.length + 1);
+    expect(after.screeningRuns).toHaveLength(before.screeningRuns.length + 1);
+    expect(after.candidate).toMatchObject({ name: 'Sadia A. Akter', email: 'sadia.akter@example.com' }); // corrected: kept
+    expect(after.skills).toBe(before.skills);
+    // A name read wrongly by an older extractor (nobody corrected it) is replaced by the new reading.
+    const a = (await hr.get(`/api/applications/${ids.appA}`)).body;
+    await ds.query(`UPDATE candidates SET name = 'Dhaka.' WHERE id = $1`, [a.candidateId]);
+    await hr.post(`/api/applications/${ids.appA}/reread`).expect(200);
+    await jobs.drain();
+    expect((await hr.get(`/api/applications/${ids.appA}`)).body.candidate.name).toBe('Rahim Uddin');
+    // A whole vacancy, by someone who may run screening on it; others are refused.
+    expect((await hr.post(`/api/vacancies/${ids.vacancy}/reread`).expect(200)).body.queued).toBeGreaterThanOrEqual(3);
+    await jobs.drain();
+    await (await as('requester.admin')).post(`/api/vacancies/${ids.vacancy}/reread`).expect(403);
+    const audit = await (await as('admin')).get(`/api/audit?entityType=Vacancy&entityId=${ids.vacancy}&pageSize=50`).expect(200);
+    expect(audit.body.items.some((e: any) => e.action === 'cv.reread')).toBe(true);
   });
 
   it('AC-13: the same person applying to a second vacancy is flagged, then merged to one Candidate ID', async () => {
@@ -345,7 +401,7 @@ describe('Vacancy, job post, CV intake and screening', () => {
     await wb.xlsx.load(res.body);
     const ws = wb.worksheets[0];
     const header = (ws.getRow(1).values as any[]).slice(1);
-    expect(header).toEqual(['Candidate ID', 'Application ID', 'Candidate Name', 'Education', 'Institution', 'CGPA', 'Work Experience (years)', 'Workplace', 'Email', 'Phone', 'Applied Position', 'Screening Status', 'Screening Reasons', 'Remarks']);
+    expect(header).toEqual(['Candidate ID', 'Application ID', 'Candidate Name', 'Education', 'Institution', 'CGPA', 'Work Experience (years)', 'Workplace', 'Email', 'Phone', 'Applied Position', 'Screening Status', 'Match Score (%)', 'Screening Reasons', 'Remarks']);
     expect(ws.rowCount - 1).toBe(3);
     const a = await (await as('recruiter')).get(`/api/applications/${ids.appA}`);
     expect(ws.getRow(2).getCell(2).value).toBe(a.body.applicationNo);
@@ -446,6 +502,18 @@ describe('Selection, evaluation, communication and joining', () => {
     const marks = (await hr.get(`/api/applications/${ids.appC}`)).body.marks;
     expect(marks.map((m: any) => [m.stageType, m.marks])).toEqual([['INTERVIEW', 66]]);
     await hr.post(`/api/vacancies/${ids.vacancy}/marks-import-main`).attach('file', await marksFile([[b.applicationNo, null, 'Karim', 5]]), 'single.xlsx').expect(400);
+
+    // The downloaded sheet carries the marks already entered (owner, 2026-11-09); uploading it back unchanged changes nothing.
+    const again = await hr.get(`/api/vacancies/${ids.vacancy}/marks-template?stageType=MAIN`).buffer(true).parse((res, cb) => { const c: Buffer[] = []; res.on('data', (d: Buffer) => c.push(d)); res.on('end', () => cb(null, Buffer.concat(c))); }).expect(200);
+    const wb2 = new ExcelJS.Workbook();
+    await wb2.xlsx.load(again.body);
+    const rowOf = (appNo: string) => { let found: any[] = []; wb2.worksheets[0].eachRow((row) => { if (row.getCell(1).value === appNo) found = [row.getCell(4).value, row.getCell(5).value]; }); return found; };
+    expect(rowOf(b.applicationNo)).toEqual([64, 70]);
+    expect(rowOf(c.applicationNo)).toEqual([null, 66]);
+    const back = (await hr.post(`/api/vacancies/${ids.vacancy}/marks-import-main?writtenMaxMarks=100&interviewMaxMarks=100`).attach('file', again.body, 'same.xlsx').expect(201)).body;
+    let resaved = 0;
+    for (const x of back.batches) resaved += (await hr.post(`/api/imports/${x.id}/confirm`).send({}).expect(200)).body.saved;
+    expect(resaved).toBe(0);
   });
 
   it('AC-21: interview marks are linked to the application with evaluator and timestamp; attendance is explicit', async () => {
@@ -539,6 +607,50 @@ describe('Selection, evaluation, communication and joining', () => {
     expect((await ds.query(`SELECT count(*)::int AS n FROM joining_records WHERE status = 'Approved'`))[0].n).toBe(1);
   });
 
+  it('joining updates the dept-total and designation quota rows automatically (owner, 2026-11-09)', async () => {
+    const ict = await as('requester.ict');
+    // Make sure both a dept-total row and the Software Developer designation row exist with a known baseline.
+    const present = (await ict.get('/api/master/quotas').expect(200)).body as any[];
+    const upsert = async (positionId: string | null, approvedQuota: number, presentManpower: number) => {
+      const row = present.find((q) => q.companyId === ids.ho && q.departmentId === ids.ict && q.positionId === positionId);
+      if (row) {
+        // Super Admin to bypass the quota-chart guard when a row already exists.
+        await (await as('admin')).patch(`/api/master/quotas/${row.id}`).send({ approvedQuota, presentManpower }).expect(200);
+        return row.id as string;
+      }
+      return (await ict.post('/api/master/quotas').send({ companyId: ids.ho, departmentId: ids.ict, positionId, approvedQuota, presentManpower }).expect(201)).body.id as string;
+    };
+    const deptId = await upsert(null, 50, 40);
+    const desigId = await upsert(ids.dev, 10, 7);
+    // One joining already happened in AC-23; count it in by taking the current present manpower as the new baseline.
+    const row = async (id: string) => (await ict.get(`/api/master/quotas`).expect(200)).body.find((q: any) => q.id === id);
+    const before = { dept: (await row(deptId)).presentManpower, desig: (await row(desigId)).presentManpower };
+    expect(before).toEqual({ dept: 40, desig: 7 });
+    // Second joining of the same vacancy (headcount = 2 in AC-23) lifts both rows by exactly one.
+    const hr = await as('recruiter');
+    // Find the other final-selected candidate on the same vacancy and approve its joining.
+    const other = (await hr.get('/api/joining/pending').expect(200)).body[0];
+    if (other) {
+      await hr.put(`/api/joining/${other.id}`).send({ joiningDate: '2026-12-02' }).expect(200);
+      await hr.post(`/api/joining/${other.id}/approve`).send({ joiningDate: '2026-12-02' }).expect(200);
+      expect((await row(deptId)).presentManpower).toBe(before.dept + 1);
+      expect((await row(desigId)).presentManpower).toBe(before.desig + 1);
+    }
+    // Dept-total rows come before designation rows (owner, 2026-11-09): admin sees totals at the top.
+    const list = (await ict.get(`/api/master/quotas?departmentId=${ids.ict}`).expect(200)).body as any[];
+    const totals = list.filter((r) => !r.positionId);
+    const designations = list.filter((r) => r.positionId);
+    if (totals.length && designations.length) {
+      const lastTotalIdx = list.lastIndexOf(totals[totals.length - 1]);
+      const firstDesigIdx = list.indexOf(designations[0]);
+      expect(lastTotalIdx).toBeLessThan(firstDesigIdx);
+    }
+    // Audit records the auto-update with the change and the reason.
+    const audit = (await (await as('admin')).get(`/api/audit?entityType=ManpowerQuota&entityId=${deptId}&pageSize=10`).expect(200)).body.items;
+    const auto = audit.find((e: any) => e.action === 'quota.auto_update');
+    if (auto) expect(auto.newValues).toMatchObject({ reason: 'joining.approved' });
+  });
+
   it('AC-25: critical changes are audited with actor, record and old/new values', async () => {
     const audit = await (await as('admin')).get('/api/audit?pageSize=500').expect(200);
     const actions = new Set(audit.body.items.map((e: any) => e.action));
@@ -556,6 +668,7 @@ describe('Selection, evaluation, communication and joining', () => {
     const up = await hr.post(`/api/vacancies/${ids.vacancy}/cvs`).attach('files', Buffer.from('%PDF-1.4 not really a pdf'), 'broken.pdf').expect(201);
     await jobs.drain();
     const appId = up.body[0].applicationId;
+    ids.broken = appId;
     expect((await hr.get(`/api/applications/${appId}`)).body.processingStatus).toBe('Failed');
     const before = (await ds.query(`SELECT count(*)::int AS n FROM applications`))[0].n;
     const job = (await ds.query(`SELECT id FROM processing_jobs WHERE "refId" = $1 AND status = 'Failed'`, [appId]))[0];
@@ -620,7 +733,7 @@ describe('Candidate CV Bank (department -> vacancy -> candidates) and applicatio
     expect(statusOf(list.body.items, ids.appB)).toBe('Not Selected');
     expect(statusOf(list.body.items, ids.appC)).toBe('Interview');
     const rowA = list.body.items.find((r: any) => r.applicationId === ids.appA);
-    expect(rowA).toMatchObject({ department: 'ICT', companyCode: 'HO', positionTitle: 'Software Developer', criteriaMet: 2, criteriaTotal: 2, screeningBasis: 'REQUISITION', documentName: 'rahim.txt' });
+    expect(rowA).toMatchObject({ department: 'ICT', companyCode: 'HO', positionTitle: 'Software Developer', criteriaMet: 3, criteriaTotal: 3, screeningScore: 100, screeningBasis: 'REQUISITION', documentName: 'rahim.txt' });
     expect(list.body.items.find((r: any) => r.processingStatus === 'Failed').status).toBe('Review Required');
     expect(list.body.items.find((r: any) => r.applicationId === ids.appC)).toMatchObject({ remarkCount: 1, latestRemark: 'সাক্ষাৎকারের জন্য উপযুক্ত' });
     const ns = await hr.get('/api/cv-bank/applications?status=Not%20Selected').expect(200);
@@ -646,7 +759,7 @@ describe('Candidate CV Bank (department -> vacancy -> candidates) and applicatio
     const v2 = (await hr.put(`/api/vacancies/${ids.vacancy2}`).send({ specialization: ' MBA ' }).expect(200)).body;
     expect(v2).toMatchObject({ specialization: 'MBA', specializationVersion: 1 });
     expect((await hr.put(`/api/vacancies/${ids.vacancy2}`).send({ specialization: 'MBA' }).expect(200)).body.specializationVersion).toBe(1); // unchanged wording
-    expect((await hr.get(`/api/vacancies/${ids.vacancy2}`).expect(200)).body.screening).toEqual({ source: 'VACANCY', reqNo: null, education: null, skills: null, experienceYears: null, other: 'MBA', items: ['MBA'] });
+    expect((await hr.get(`/api/vacancies/${ids.vacancy2}`).expect(200)).body.screening).toEqual({ source: 'VACANCY', reqNo: null, education: null, skills: null, experienceYears: null, other: 'MBA', keyResponsibilities: null, items: ['MBA'] });
     await hr.post(`/api/vacancies/${ids.vacancy2}/rescreen`).expect(200);
     await jobs.drain();
     const screened = (await hr.get(`/api/applications/${ids.appA2}`)).body;
@@ -727,11 +840,19 @@ describe('Candidate CV Bank (department -> vacancy -> candidates) and applicatio
     expect(audit).toEqual(expect.arrayContaining(['joining.reject', 'joining.reopen']));
   });
 
-  it('CV can be previewed inline or downloaded as an attachment', async () => {
+  it('a CV file is not kept once read: its text is (owner, 2026-11-08); an unreadable one stays until HR enters the data', async () => {
     const hr = await as('recruiter');
-    const docId = (await hr.get(`/api/applications/${ids.appA}`)).body.documents[0].id;
-    expect((await hr.get(`/api/documents/${docId}`).expect(200)).headers['content-disposition']).toMatch(/^inline/);
-    expect((await hr.get(`/api/documents/${docId}?download=1`).expect(200)).headers['content-disposition']).toMatch(/^attachment/);
+    const doc = (await hr.get(`/api/applications/${ids.appA}`)).body.documents[0];
+    expect(doc).toMatchObject({ storageKey: null, originalName: 'rahim.txt', textContent: expect.stringContaining('Rahim Uddin'), fileRemovedAt: expect.any(String) });
+    expect(doc.sha256).toHaveLength(64); // still refuses the same file twice and finds duplicates
+    expect((await hr.get(`/api/documents/${doc.id}`).expect(404)).body.message).toMatch(/not kept/);
+    // The broken PDF could not be read: HR can still open it, until the data is entered by hand.
+    const broken = (await hr.get(`/api/applications/${ids.broken}`)).body.documents[0];
+    expect((await hr.get(`/api/documents/${broken.id}`).expect(200)).headers['content-disposition']).toMatch(/^inline/);
+    expect((await hr.get(`/api/documents/${broken.id}?download=1`).expect(200)).headers['content-disposition']).toMatch(/^attachment/);
+    await hr.patch(`/api/applications/${ids.broken}`).send({ name: 'Broken File Person', degree: 'BSc' }).expect(200);
+    await hr.get(`/api/documents/${broken.id}`).expect(404);
+    expect((await hr.get(`/api/applications/${ids.broken}`)).body.documents[0]).toMatchObject({ storageKey: null, textContent: null, originalName: 'broken.pdf' });
   });
 });
 
@@ -832,14 +953,13 @@ describe('HR coordinator assignment and coordinator-specific access', () => {
     expect(apps.length).toBeGreaterThan(0);
     const appId = apps[0].id;
     const cv = (await own.get(`/api/cv-bank/applications?vacancyId=${ids.vacancy}`).expect(200)).body.items.find((r: any) => r.documentId);
-    await own.get(`/api/documents/${cv.documentId}`).expect(200);
+    await own.get(`/api/documents/${cv.documentId}`).expect(404); // allowed, but the file is no longer kept
 
     // Unassigned HR user: nothing listed, every direct request refused.
     expect((await other.get('/api/vacancies').expect(200)).body.items).toEqual([]);
     expect((await other.get('/api/cv-bank/applications').expect(200)).body.total).toBe(0);
     expect((await other.get('/api/cv-bank/tree').expect(200)).body.departments.every((dep: any) => dep.vacancies.length === 0)).toBe(true);
     expect((await other.get('/api/joining/joined').expect(200)).body.total).toBe(0);
-    expect((await other.get('/api/email/history').expect(200)).body).toEqual([]);
     for (const path of [`/api/vacancies/${ids.vacancy}`, `/api/vacancies/${ids.vacancy}/applications`, `/api/vacancies/${ids.vacancy}/evaluation`,
       `/api/applications/${appId}`, `/api/documents/${cv.documentId}`, `/api/job-posts/${ids.jobPost}`, `/api/vacancies/${ids.vacancy}/export`]) {
       await other.get(path).expect(403);
@@ -1171,8 +1291,8 @@ describe('Direct HR vacancy: coordinator chosen at creation', () => {
     const structured = (await mgr.post('/api/vacancies/direct').send({ ...body(), requiredEducation: ' BSc in CSE\nDiploma in Computer ', requiredSkills: 'CCNA, MikroTik', requiredExperienceYears: 3 }).expect(201)).body;
     expect(structured).toMatchObject({ requiredEducation: 'BSc in CSE\nDiploma in Computer', requiredSkills: 'CCNA, MikroTik', requiredExperienceYears: 3, specialization: null, specializationVersion: 1 });
     expect((await mgr.get(`/api/vacancies/${structured.id}`).expect(200)).body.screening).toEqual({
-      source: 'VACANCY', reqNo: null, education: 'BSc in CSE\nDiploma in Computer', skills: 'CCNA, MikroTik', experienceYears: 3, other: null,
-      items: ['Education: BSc in CSE or Diploma in Computer', 'Experience: at least 3 years', 'Skill: CCNA', 'Skill: MikroTik'],
+      source: 'VACANCY', reqNo: null, education: 'BSc in CSE\nDiploma in Computer', skills: 'CCNA, MikroTik', experienceYears: 3, other: null, keyResponsibilities: null,
+      items: ['Education: BSc in CSE or Diploma in Computer', 'Experience: at least 3 years', 'Required Skills (2 points)', 'match score at least 70%'],
     });
     await mgr.post('/api/vacancies/direct').send({ ...body(), requiredExperienceYears: 'many' }).expect(400);
     expect((await mgr.put(`/api/vacancies/${structured.id}`).send({ requiredExperienceYears: 2 }).expect(200)).body).toMatchObject({ requiredExperienceYears: 2, specializationVersion: 2 });
@@ -1318,31 +1438,38 @@ describe('Mail folder scan and CV data Excel', () => {
     await wb.xlsx.load(res.body);
     const ws = wb.worksheets[0];
     expect(ws.getRow(1).values).toEqual([undefined,
-      'APPLICATION ID', 'EMAIL', 'NAME OF THE APPLICANT', 'DATE OF RECEIVING CV', 'LAST POSITION', 'LAST ORGANIZATION NAME', 'TOTAL YEAR OF EXPERIENCE',
+      'APPLICATION ID', 'CANDIDATE ID', 'EMAIL', 'NAME OF THE APPLICANT', 'DATE OF RECEIVING CV', 'LAST POSITION', 'LAST ORGANIZATION NAME', 'TOTAL YEAR OF EXPERIENCE',
       'PRELIMINARY RECOMMENDED POSITION', 'PRELIMINARY RECOMMENDED DEPARTMENT', 'PRELIMINARY RECOMMENDED FACTORY', 'MOBILE NO.', 'SOURCE OF CV',
       'EDUCATIONAL STATUS', 'EDUCATION SPECIALIZATION WITH REMARK (IF ANY)', 'ADDRESS', 'SKILLS', 'PREVIOUS JOBS & DESIGNATIONS', 'CERTIFICATIONS',
-      'EXPECTED SALARY', 'AGE']);
+      'EXPECTED SALARY', 'AGE', 'INSTITUTION', 'CGPA', 'ALL EDUCATION', 'SCREENING RESULT', 'MATCH SCORE (%)', 'SCREENING REASONS', 'SHORTLISTED',
+      'FINAL DECISION', 'HR REMARKS']);
     expect(ws.rowCount).toBe(3);
-    const row = ws.getRow(2);
-    expect(row.getCell(2).value).toBe('karim.rahman@example.com');
-    expect(row.getCell(3).value).toBe('Karim Rahman');
-    expect(row.getCell(5).value).toBe('Sr. Network Engineer');
-    expect(row.getCell(6).value).toBe('Acme Ltd.');
-    expect(row.getCell(7).value).toBe(6);
-    expect(row.getCell(8).value).toBe('Network Engineer');
-    expect(row.getCell(9).value).toBe('ICT');
-    expect(row.getCell(10).value).toBe('HO');
-    expect(row.getCell(12).value).toBe('EMAIL');
-    expect(row.getCell(14).value).toBe('Computer Science');
-    expect(row.getCell(15).value).toBe('House 12, Road 5, Uttara, Dhaka');
-    expect(row.getCell(17).value).toBe('Sr. Network Engineer, Acme Ltd.');
-    expect(row.getCell(18).value).toBe('CCNA, CCNP');
+    const headers = (ws.getRow(1).values as string[]).slice(1);
+    const cell = (h: string) => ws.getRow(2).getCell(headers.indexOf(h) + 1).value;
+    expect(cell('CANDIDATE ID')).toMatch(/^CAND-/);
+    expect(cell('EMAIL')).toBe('karim.rahman@example.com');
+    expect(cell('NAME OF THE APPLICANT')).toBe('Karim Rahman');
+    expect(cell('LAST POSITION')).toBe('Sr. Network Engineer');
+    expect(cell('LAST ORGANIZATION NAME')).toBe('Acme Ltd.');
+    expect(cell('TOTAL YEAR OF EXPERIENCE')).toBe(6);
+    expect(cell('PRELIMINARY RECOMMENDED POSITION')).toBe('Network Engineer');
+    expect(cell('PRELIMINARY RECOMMENDED DEPARTMENT')).toBe('ICT');
+    expect(cell('PRELIMINARY RECOMMENDED FACTORY')).toBe('HO');
+    expect(cell('SOURCE OF CV')).toBe('EMAIL');
+    expect(cell('EDUCATION SPECIALIZATION WITH REMARK (IF ANY)')).toBe('Computer Science');
+    expect(cell('ADDRESS')).toBe('House 12, Road 5, Uttara, Dhaka');
+    expect(cell('PREVIOUS JOBS & DESIGNATIONS')).toBe('Sr. Network Engineer, Acme Ltd.');
+    expect(cell('CERTIFICATIONS')).toBe('CCNA, CCNP');
+    // The screening data sits in the same sheet (owner, 2026-11-08).
+    expect(['Pass', 'Review Required', 'Not screened']).toContain(cell('SCREENING RESULT'));
+    expect(cell('SHORTLISTED')).toBe('No');
+    expect(cell('FINAL DECISION')).toBe('Pending');
     await (await as('examiner')).get(`/api/vacancies/${vacancyId}/cv-data-export`).expect(403);
   });
 
   it('the same sheet can be viewed in the browser, only by those who may see the vacancy', async () => {
     const sheet = (await (await as('hr.manager')).get(`/api/vacancies/${vacancyId}/cv-data`).expect(200)).body;
-    expect(sheet.columns.map((c: any) => c.header)).toHaveLength(20);
+    expect(sheet.columns.map((c: any) => c.header)).toHaveLength(30);
     expect(sheet.rows).toHaveLength(2);
     expect(sheet.rows[0]).toMatchObject({ name: 'Karim Rahman', address: 'House 12, Road 5, Uttara, Dhaka', previousJobs: 'Sr. Network Engineer, Acme Ltd.', certifications: 'CCNA, CCNP' });
     await (await as('recruiter')).get(`/api/vacancies/${vacancyId}/cv-data`).expect(403); // not its coordinator
@@ -1381,11 +1508,326 @@ describe('Security hardening (security test, 2026-11-05)', () => {
     expect(r.headers['x-powered-by']).toBeUndefined();
   });
 
+  it('signing out ends the session: the old token is refused, a new sign-in works (security test, 2026-11-09)', async () => {
+    const login = () => request(app.getHttpServer()).post('/api/auth/login').send({ email: 'viewer@ars.local', password: config.seedPassword }).expect(200);
+    const cookie = (await login()).headers['set-cookie'][0].split(';')[0];
+    await request(app.getHttpServer()).get('/api/auth/me').set('Cookie', cookie).expect(200);
+    await request(app.getHttpServer()).post('/api/auth/logout').set('Cookie', cookie).expect(200); // right away: same second as the sign-in
+    const after = await request(app.getHttpServer()).get('/api/auth/me').set('Cookie', cookie).expect(401);
+    expect(after.body.message).toMatch(/session has ended/);
+    const fresh = (await login()).headers['set-cookie'][0].split(';')[0];
+    await request(app.getHttpServer()).get('/api/auth/me').set('Cookie', fresh).expect(200);
+    await request(app.getHttpServer()).post('/api/auth/logout').set('Cookie', 'ars_token=garbage').expect(200); // a bad token just clears the cookie
+    delete agents.viewer; // the shared agent's token was ended too
+  });
+
   it('repeated wrong passwords lock that email for a while; other accounts still sign in', async () => {
     const attempt = (email: string, password = 'wrong-password') => request(app.getHttpServer()).post('/api/auth/login').set('X-Forwarded-For', '203.0.113.9').send({ email, password });
     for (let i = 0; i < 5; i++) await attempt('nobody@ars.local').expect(401);
     const locked = await attempt('Nobody@ars.local').expect(429); // the count is per email, whatever its case
     expect(locked.body.message).toMatch(/Too many failed sign-in attempts/);
     await attempt('examiner@ars.local', config.seedPassword).expect(200);
+  });
+
+  it('two CVs of the same person read by two workers at once are still flagged as a possible duplicate (2026-11-09)', async () => {
+    await ds.query(`UPDATE vacancies SET status = 'Screening' WHERE id = $1`, [ids.vacancy2]);
+    const coordinator = (await ds.query(`SELECT u.email FROM vacancies v JOIN users u ON u.id = v."coordinatorId" WHERE v.id = $1`, [ids.vacancy2]))[0].email.replace('@ars.local', '');
+    const hr = await as(coordinator);
+    const cv = (extra: string) => Buffer.from(`Twin Person\ntwin.person@example.com\n01711300001\nEDUCATION\nMBA, 2020\n${extra}`);
+    await hr.post(`/api/vacancies/${ids.vacancy2}/cvs`).attach('files', cv('Skills: Excel'), 'twin-a.txt').attach('files', cv('Skills: Word'), 'twin-b.txt').expect(201);
+    await Promise.all([jobs.drain(), jobs.drain(), jobs.drain()]);
+    const rows = await ds.query(`SELECT a."duplicateReview" AS d FROM applications a JOIN candidates c ON c.id = a."candidateId" WHERE c."emailNormalized" = 'twin.person@example.com'`);
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r: any) => r.d === 'PENDING')).toHaveLength(1);
+  });
+
+  it('expected salary is shown on the Interview page and corrected there without re-running screening (owner, 2026-11-09)', async () => {
+    const coordinator = (await ds.query(`SELECT u.email FROM vacancies v JOIN users u ON u.id = v."coordinatorId" WHERE v.id = $1`, [ids.vacancy2]))[0].email.replace('@ars.local', '');
+    const hr = await as(coordinator);
+    const row = (await hr.get('/api/interviews/board').expect(200)).body.rows.find((r: any) => r.vacancy.id === ids.vacancy2);
+    expect(row).toHaveProperty('expectedSalary');
+    const jobs0 = (await ds.query(`SELECT count(*)::int AS n FROM processing_jobs WHERE "refId" = $1 AND type = 'SCREENING'`, [row.applicationId]))[0].n;
+    expect((await hr.patch(`/api/applications/${row.applicationId}`).send({ expectedSalary: '60,000' }).expect(200)).body.expectedSalary).toBe('60,000');
+    expect((await ds.query(`SELECT count(*)::int AS n FROM processing_jobs WHERE "refId" = $1 AND type = 'SCREENING'`, [row.applicationId]))[0].n).toBe(jobs0);
+    await hr.patch(`/api/applications/${row.applicationId}`).send({ expectedSalary: 'x'.repeat(61) }).expect(400);
+    expect((await hr.get('/api/interviews/board').expect(200)).body.rows.find((r: any) => r.applicationId === row.applicationId).expectedSalary).toBe('60,000');
+  });
+
+  it('Remove on the Interview page moves a candidate back one stage (owner, 2026-11-09)', async () => {
+    await ds.query(`UPDATE vacancies SET status = 'Screening' WHERE id = $1`, [ids.vacancy2]);
+    const coordinator = (await ds.query(`SELECT u.email FROM vacancies v JOIN users u ON u.id = v."coordinatorId" WHERE v.id = $1`, [ids.vacancy2]))[0].email.replace('@ars.local', '');
+    const hr = await as(coordinator);
+    for (const [name, phone] of [['Back One', '01711400001'], ['Back Two', '01711400002'], ['Back Three', '01711400003']]) {
+      await hr.post(`/api/vacancies/${ids.vacancy2}/cvs`).attach('files', Buffer.from(`${name}\n${name.replace(' ', '.').toLowerCase()}@example.com\n${phone}\nEDUCATION\nMBA, 2020`), `${phone}.txt`).expect(201);
+    }
+    await jobs.drain();
+    const apps = (await ds.query(`SELECT a.id FROM applications a JOIN candidates c ON c.id = a."candidateId" WHERE a."vacancyId" = $1 AND c.phone LIKE '%0171140000%' ORDER BY c.phone`, [ids.vacancy2])).map((x: any) => x.id);
+    await hr.post(`/api/vacancies/${ids.vacancy2}/shortlist`).send({ applicationIds: apps, shortlisted: true, reason: 'test' }).expect(200);
+    await hr.post('/api/interviews/schedule').send({ applicationIds: apps, stageType: 'INTERVIEW', scheduledAt: '2026-12-01T04:00:00.000Z' }).expect(200);
+    for (const a of apps) await hr.put(`/api/applications/${a}/marks`).send({ stageType: 'WRITTEN', marks: 50, maxMarks: 100 }).expect(200);
+    await hr.post(`/api/applications/${apps[2]}/final-decision`).send({ decision: 'Selected' }).expect(200);
+    const count = async (t: string, a: string) => (await ds.query(`SELECT count(*)::int AS n FROM ${t} WHERE "applicationId" = $1`, [a]))[0].n;
+
+    await (await as('examiner')).post('/api/interviews/move-back').send({ applicationIds: [apps[0]], to: 'schedule' }).expect(403);
+    await hr.post('/api/interviews/move-back').send({ applicationIds: [apps[0]], to: 'elsewhere' }).expect(400);
+    // Step 2 Remove: back to Schedule; the interview record and marks go, still shortlisted.
+    expect((await hr.post('/api/interviews/move-back').send({ applicationIds: [apps[0]], to: 'schedule' }).expect(200)).body).toMatchObject({ moved: 1, failed: 0 });
+    expect([await count('candidate_stages', apps[0]), await count('evaluation_marks', apps[0])]).toEqual([0, 0]);
+    expect((await ds.query(`SELECT shortlisted FROM applications WHERE id = $1`, [apps[0]]))[0].shortlisted).toBe(true);
+    // Step 1 Remove: off the shortlist and off the Interview page.
+    expect((await hr.post('/api/interviews/move-back').send({ applicationIds: [apps[1]], to: 'screening' }).expect(200)).body.moved).toBe(1);
+    expect((await ds.query(`SELECT shortlisted FROM applications WHERE id = $1`, [apps[1]]))[0].shortlisted).toBe(false);
+    const board = (await hr.get('/api/interviews/board').expect(200)).body.rows.map((r: any) => r.applicationId);
+    expect(board).toContain(apps[0]);
+    expect(board).not.toContain(apps[1]);
+    // A decided candidate is refused until the decision is removed (step 3).
+    const refused = (await hr.post('/api/interviews/move-back').send({ applicationIds: [apps[2]], to: 'schedule' }).expect(200)).body;
+    expect(refused.results[0]).toMatchObject({ ok: false, error: expect.stringMatching(/final decision is Selected/) });
+    await hr.post(`/api/applications/${apps[2]}/final-decision`).send({ decision: 'Pending' }).expect(200);
+    expect((await ds.query(`SELECT count(*)::int AS n FROM joining_records WHERE "applicationId" = $1`, [apps[2]]))[0].n).toBe(0); // left Joining Pending
+    expect((await hr.post('/api/interviews/move-back').send({ applicationIds: [apps[2]], to: 'screening' }).expect(200)).body.moved).toBe(1);
+    const [audit] = await ds.query(`SELECT "oldValues" FROM audit_events WHERE action = 'interview.remove_to_schedule' AND "entityId" = $1`, [apps[0]]);
+    expect(audit.oldValues.marks).toEqual([expect.objectContaining({ stage: 'WRITTEN', marks: 50 })]);
+  });
+
+  it('the Interview Board sends several candidates to Joining Pending with one planned date (owner, 2026-11-08)', async () => {
+    await ds.query(`UPDATE vacancies SET status = 'Screening' WHERE id = $1`, [ids.vacancy2]);
+    const coordinator = (await ds.query(`SELECT u.email FROM vacancies v JOIN users u ON u.id = v."coordinatorId" WHERE v.id = $1`, [ids.vacancy2]))[0].email.replace('@ars.local', '');
+    const hr = await as(coordinator);
+    for (const [name, phone] of [['Board One', '01711200001'], ['Board Two', '01711200002'], ['Board Three', '01711200003']]) {
+      await hr.post(`/api/vacancies/${ids.vacancy2}/cvs`).attach('files', Buffer.from(`${name}\n${name.replace(' ', '.').toLowerCase()}@example.com\n${phone}\nEDUCATION\nMBA, 2020`), `${phone}.txt`).expect(201);
+    }
+    await jobs.drain();
+    const apps = (await ds.query(`SELECT a.id FROM applications a JOIN candidates c ON c.id = a."candidateId" WHERE a."vacancyId" = $1 AND c.phone LIKE '%0171120000%' ORDER BY c.phone`, [ids.vacancy2])).map((x: any) => x.id);
+    expect(apps).toHaveLength(3);
+    await ds.query(`UPDATE applications SET shortlisted = true WHERE id = ANY($1::uuid[])`, [apps.slice(0, 2)]); // the third is not shortlisted
+
+    await (await as('examiner')).post('/api/applications/send-to-joining').send({ applicationIds: apps, joiningDate: '2026-12-10' }).expect(403);
+    await hr.post('/api/applications/send-to-joining').send({ applicationIds: apps, joiningDate: '10-12-2026' }).expect(400);
+    const r = (await hr.post('/api/applications/send-to-joining').send({ applicationIds: apps, joiningDate: '2026-12-10' }).expect(200)).body;
+    expect(r).toMatchObject({ sent: 2, failed: 1 });
+    expect(r.results[2].error).toMatch(/Shortlist the candidate/);
+    const pending = (await hr.get('/api/joining/pending').expect(200)).body.filter((j: any) => apps.includes(j.applicationId));
+    expect(pending.map((j: any) => [j.applicationId, j.joiningDate]).sort()).toEqual([[apps[0], '2026-12-10'], [apps[1], '2026-12-10']].sort());
+    expect((await ds.query(`SELECT "finalDecision" FROM applications WHERE id = ANY($1::uuid[]) ORDER BY id`, [apps.slice(0, 2)])).map((x: any) => x.finalDecision)).toEqual(['Selected', 'Selected']);
+    // Sending again moves the planned date; a candidate already joined or rejected at joining is left alone.
+    expect((await hr.post('/api/applications/send-to-joining').send({ applicationIds: [apps[0]], joiningDate: '2026-12-12' }).expect(200)).body.sent).toBe(1);
+    expect((await ds.query(`SELECT "joiningDate"::text AS d FROM joining_records WHERE "applicationId" = $1`, [apps[0]]))[0].d).toBe('2026-12-12');
+    const j1 = pending.find((j: any) => j.applicationId === apps[1]).id;
+    await hr.post(`/api/joining/${j1}/reject`).send({ remarks: 'Declined the offer' }).expect(200);
+    const again = (await hr.post('/api/applications/send-to-joining').send({ applicationIds: [apps[1]], joiningDate: '2026-12-12' }).expect(200)).body;
+    expect(again.results[0]).toMatchObject({ ok: false, error: expect.stringMatching(/Rejected at joining/) });
+    await ds.query(`UPDATE joining_records SET status = 'Rejected' WHERE "applicationId" = $1`, [apps[0]]); // out of the way of later tests
+  });
+
+  it('several pending joinings are approved at once on one date; each is checked on its own (owner, 2026-11-08)', async () => {
+    await ds.query(`UPDATE vacancies SET status = 'Screening' WHERE id = $1`, [ids.vacancy2]);
+    const coordinator = (await ds.query(`SELECT u.email FROM vacancies v JOIN users u ON u.id = v."coordinatorId" WHERE v.id = $1`, [ids.vacancy2]))[0].email.replace('@ars.local', '');
+    const other = coordinator === 'recruiter' ? 'recruiter2' : 'recruiter';
+    const hr = await as(coordinator);
+    const people = [['Batch One', '01711100001'], ['Batch Two', '01711100002'], ['Batch Three', '01711100003']];
+    for (const [name, phone] of people) {
+      await hr.post(`/api/vacancies/${ids.vacancy2}/cvs`).attach('files', Buffer.from(`${name}\n${name.replace(' ', '.').toLowerCase()}@example.com\n${phone}\nEDUCATION\nMBA, 2020`), `${phone}.txt`).expect(201);
+    }
+    await jobs.drain();
+    const apps = (await ds.query(`SELECT a.id FROM applications a JOIN candidates c ON c.id = a."candidateId" WHERE a."vacancyId" = $1 AND c.phone LIKE '%0171110000%' ORDER BY c.phone`, [ids.vacancy2])).map((x: any) => x.id);
+    expect(apps).toHaveLength(3);
+    await ds.query(`UPDATE applications SET shortlisted = true WHERE id = ANY($1::uuid[])`, [apps]);
+    for (const a of apps) await hr.post(`/api/applications/${a}/final-decision`).send({ decision: 'Selected' }).expect(200);
+    const pending = (await hr.get('/api/joining/pending').expect(200)).body.filter((j: any) => apps.includes(j.applicationId));
+    const jids = apps.map((a: string) => pending.find((j: any) => j.applicationId === a).id);
+    // Two seats left: the third is refused, the first two still join.
+    const [{ joined }] = await ds.query(`SELECT count(*)::int AS joined FROM joining_records j JOIN applications a ON a.id = j."applicationId" WHERE a."vacancyId" = $1 AND j.status = 'Approved'`, [ids.vacancy2]);
+    await ds.query(`UPDATE vacancies SET headcount = $2 WHERE id = $1`, [ids.vacancy2, joined + 2]);
+    // Salary on Joining Pending (owner, 2026-11-09): saved trimmed, an empty value clears it, kept with recruitment.
+    expect((await hr.put(`/api/joining/${jids[0]}`).send({ salary: '  45,000 per month ' }).expect(200)).body.salary).toBe('45,000 per month');
+    expect((await hr.put(`/api/joining/${jids[1]}`).send({ salary: '50,000' }).expect(200)).body.salary).toBe('50,000');
+    expect((await hr.put(`/api/joining/${jids[1]}`).send({ salary: '' }).expect(200)).body.salary).toBeNull();
+    await hr.put(`/api/joining/${jids[1]}`).send({ salary: 'x'.repeat(101) }).expect(400);
+    await (await as(other)).put(`/api/joining/${jids[0]}`).send({ salary: '1' }).expect(403);
+    expect((await hr.get('/api/joining/pending').expect(200)).body.find((j: any) => j.id === jids[0]).salary).toBe('45,000 per month');
+
+    await (await as('examiner')).post('/api/joining/approve-batch').send({ ids: jids, joiningDate: '2026-12-15' }).expect(403);
+    await hr.post('/api/joining/approve-batch').send({ ids: [], joiningDate: '2026-12-15' }).expect(400);
+    const notMine = (await (await as(other)).post('/api/joining/approve-batch').send({ ids: jids, joiningDate: '2026-12-15' }).expect(200)).body;
+    expect(notMine).toMatchObject({ approved: 0, failed: 3 }); // another coordinator's vacancy
+
+    const r = (await hr.post('/api/joining/approve-batch').send({ ids: jids, joiningDate: '2026-12-15', remarks: 'Joined together' }).expect(200)).body;
+    expect(r).toMatchObject({ approved: 2, failed: 1 });
+    expect(r.results.map((x: any) => x.ok)).toEqual([true, true, false]);
+    expect(r.results[2].error).toMatch(/already filled/);
+    const rows = await ds.query(`SELECT "applicationId", status, "joiningDate"::text AS d FROM joining_records WHERE id = ANY($1::uuid[])`, [jids]);
+    expect(rows.filter((x: any) => x.status === 'Approved').map((x: any) => x.d)).toEqual(['2026-12-15', '2026-12-15']);
+    expect((await ds.query(`SELECT status FROM vacancies WHERE id = $1`, [ids.vacancy2]))[0].status).toBe('Filled');
+    const joinedRow = async (u: string) => (await (await as(u)).get('/api/joining/joined?pageSize=100').expect(200)).body.items.find((j: any) => j.id === jids[0]);
+    expect((await joinedRow('hr.manager')).salary).toBe('45,000 per month');
+    expect((await joinedRow('requester.ict'))).toMatchObject({ salary: null, email: null }); // department users: no salary, no contacts
+  });
+
+  it('vacancy status can be set from the list; Closed vacancies are listed last (owner, 2026-11-08)', async () => {
+    const hr = await as('hr.manager');
+    const [{ status: before }] = await ds.query(`SELECT status FROM vacancies WHERE id = $1`, [ids.vacancy2]);
+    const coordinator = (await ds.query(`SELECT u.email FROM vacancies v JOIN users u ON u.id = v."coordinatorId" WHERE v.id = $1`, [ids.vacancy2]))[0].email.replace('@ars.local', '');
+    await (await as(coordinator === 'recruiter' ? 'recruiter2' : 'recruiter')).put(`/api/vacancies/${ids.vacancy2}`).send({ status: 'Closed' }).expect(403); // not their vacancy
+    await (await as(coordinator)).put(`/api/vacancies/${ids.vacancy2}`).send({ status: 'Closed' }).expect(200);
+    const list = (await hr.get('/api/vacancies?pageSize=100').expect(200)).body.items;
+    const firstClosed = list.findIndex((v: any) => v.status === 'Closed');
+    expect(firstClosed).toBeGreaterThanOrEqual(0);
+    expect(list.slice(firstClosed).every((v: any) => v.status === 'Closed')).toBe(true);
+    for (const group of [list.slice(0, firstClosed), list.slice(firstClosed)]) {
+      const t = group.map((v: any) => new Date(v.createdAt).getTime());
+      expect(t).toEqual([...t].sort((a, b) => b - a)); // newest first within each group
+    }
+    await hr.put(`/api/vacancies/${ids.vacancy2}`).send({ status: before }).expect(200);
+  });
+
+  it('a job post is deleted by the vacancy coordinator, the HR Manager or the Super Admin; its candidates stay (owner, 2026-11-08)', async () => {
+    await ds.query(`UPDATE vacancies SET status = 'Screening' WHERE id = $1 AND status IN ('Closed', 'Filled')`, [ids.vacancy2]);
+    const coordinator = (await ds.query(`SELECT u.email FROM vacancies v JOIN users u ON u.id = v."coordinatorId" WHERE v.id = $1`, [ids.vacancy2]))[0].email.replace('@ars.local', '');
+    const other = coordinator === 'recruiter' ? 'recruiter2' : 'recruiter';
+    const hr = await as('hr.manager');
+    const post = async () => (await hr.post(`/api/vacancies/${ids.vacancy2}/job-posts`).send({ title: 'Delete me' }).expect(201)).body.id;
+    const [a, b, c] = [await post(), await post(), await post()];
+    const [app] = await ds.query(`SELECT id FROM applications WHERE "vacancyId" = $1 LIMIT 1`, [ids.vacancy2]);
+    await ds.query(`UPDATE applications SET "jobPostId" = $1 WHERE id = $2`, [a, app.id]);
+
+    await (await as(other)).delete(`/api/job-posts/${a}`).expect(403); // HR, but not this vacancy's coordinator
+    await (await as('examiner')).delete(`/api/job-posts/${a}`).expect(403); // no jobpost.edit
+    await (await as('requester.ict')).delete(`/api/job-posts/${a}`).expect(403);
+    expect((await (await as(coordinator)).delete(`/api/job-posts/${a}`).expect(200)).body).toMatchObject({ deleted: true, applicationsUnlinked: 1, vacancyId: ids.vacancy2 });
+    expect((await hr.delete(`/api/job-posts/${b}`).expect(200)).body.deleted).toBe(true);
+    expect((await (await as('admin')).delete(`/api/job-posts/${c}`).expect(200)).body.deleted).toBe(true);
+    await hr.delete(`/api/job-posts/${c}`).expect(404);
+
+    const [kept] = await ds.query(`SELECT "vacancyId", "jobPostId" FROM applications WHERE id = $1`, [app.id]);
+    expect(kept).toEqual({ vacancyId: ids.vacancy2, jobPostId: null });
+    const posts = (await hr.get(`/api/vacancies/${ids.vacancy2}`).expect(200)).body.jobPosts.map((j: any) => j.id);
+    for (const id of [a, b, c]) expect(posts).not.toContain(id);
+    const [audit] = await ds.query(`SELECT "newValues" FROM audit_events WHERE action = 'jobpost.delete' AND "entityId" = $1`, [a]);
+    expect(audit.newValues).toEqual({ applicationsUnlinked: 1 });
+  });
+
+  it('"My recent decisions" can be sorted by date, newest or oldest first (owner, 2026-11-08)', async () => {
+    const dir = await as('director');
+    const when = async (q: string) => (await dir.get(`/api/approvals/inbox${q}`).expect(200)).body.history.map((h: any) => new Date(h.decidedAt).getTime());
+    const desc = await when('');
+    const asc = await when('?decisions=asc');
+    expect(desc.length).toBeGreaterThan(0);
+    expect(desc).toEqual([...desc].sort((a, b) => b - a));
+    expect(asc).toEqual([...asc].sort((a, b) => a - b));
+    expect(await when('?decisions=desc')).toEqual(desc);
+  });
+
+  it('the HR Approved Queue shows the requisitions approved on a chosen day (Bangladesh time) (owner, 2026-11-08)', async () => {
+    const hr = await as('hr.manager');
+    const [{ day }] = await ds.query(`SELECT to_char(("approvedAt" AT TIME ZONE 'Asia/Dhaka')::date, 'YYYY-MM-DD') AS day FROM requisitions WHERE id = $1`, [ids.req]);
+    const queue = async (q: string) => (await hr.get(`/api/hr-queue?view=all&pageSize=100${q}`).expect(200)).body.items;
+    const onDay = await queue(`&approvedOn=${day}`);
+    expect(onDay.map((r: any) => r.id)).toContain(ids.req);
+    expect(onDay.every((r: any) => new Date(r.approvedAt).toLocaleDateString('en-CA', { timeZone: 'Asia/Dhaka' }) === day)).toBe(true);
+    expect((await queue('&approvedOn=2001-01-01'))).toEqual([]);
+    expect(onDay.find((r: any) => r.id === ids.req).vacancy).toMatchObject({ vacancyNo: expect.stringMatching(/^VAC-/), applications: expect.any(Number) });
+    await hr.get('/api/hr-queue?approvedOn=08-11-2026').expect(400);
+  });
+
+  it('CV upload keeps working after a vacancy is Filled; the reconciliation migration reopens stale ones (owner, 2026-11-09)', async () => {
+    // Use `admin` because by this point the coordinator of `ids.vacancy` may have been reassigned / cleared.
+    const admin = await as('admin');
+    await ds.query(`UPDATE vacancies SET status = 'Filled' WHERE id = $1`, [ids.vacancy]);
+    // Manual CV upload still accepts even when the vacancy is Filled.
+    const up = await admin.post(`/api/vacancies/${ids.vacancy}/cvs`).attach('files', Buffer.from('Late Comer\nlate@example.com\n01999111222\nBSc in CSE'), 'late.txt').expect(201);
+    expect(up.body[0]).toMatchObject({ ok: true });
+    await jobs.drain();
+    // Direct re-run of the reconciliation SQL (migration 020): a Filled vacancy with fewer than
+    // `headcount` approved joinings is reverted to Screening, so CV flows and reports stop lying.
+    await ds.query(`UPDATE vacancies SET status = 'Filled', headcount = 99 WHERE id = $1`, [ids.vacancy]);
+    await ds.query(
+      `UPDATE vacancies v SET status = 'Screening'
+        WHERE v.status = 'Filled'
+          AND (SELECT count(*) FROM joining_records jr JOIN applications a ON a.id = jr."applicationId"
+                WHERE a."vacancyId" = v.id AND jr.status = 'Approved') < v.headcount`);
+    expect((await ds.query(`SELECT status FROM vacancies WHERE id = $1`, [ids.vacancy]))[0].status).toBe('Screening');
+    // Restore headcount so later tests see the original data.
+    await ds.query(`UPDATE vacancies SET headcount = 2 WHERE id = $1`, [ids.vacancy]);
+  });
+
+  it('Super Admin bulk-deletes selected CVs; joined candidates are refused and other data cascades (owner, 2026-11-09)', async () => {
+    const admin = await as('admin');
+    const list = (await admin.get(`/api/cv-bank/applications?vacancyId=${ids.vacancy}&pageSize=200`).expect(200)).body.items;
+    const notJoined = list.filter((r: any) => r.status !== 'Joined').slice(0, 2).map((r: any) => r.applicationId);
+    const joinedIds = list.filter((r: any) => r.status === 'Joined').map((r: any) => r.applicationId);
+    expect(notJoined.length).toBeGreaterThan(0);
+
+    // Only `candidate.delete` can call the endpoint.
+    for (const u of ['recruiter', 'hr.manager', 'requester.ict']) {
+      await (await as(u)).post('/api/cv-bank/applications/delete').send({ ids: notJoined }).expect(403);
+    }
+    await admin.post('/api/cv-bank/applications/delete').send({ ids: [] }).expect(400);
+    await admin.post('/api/cv-bank/applications/delete').send({ ids: ['not-a-uuid'] }).expect(400);
+
+    // Joined candidates are refused: nothing changes.
+    if (joinedIds.length) {
+      const before = (await ds.query(`SELECT count(*)::int AS n FROM applications WHERE id = ANY($1::uuid[])`, [[...joinedIds, ...notJoined]]))[0].n;
+      await admin.post('/api/cv-bank/applications/delete').send({ ids: [joinedIds[0], ...notJoined], reason: 'test' }).expect(409);
+      const after = (await ds.query(`SELECT count(*)::int AS n FROM applications WHERE id = ANY($1::uuid[])`, [[...joinedIds, ...notJoined]]))[0].n;
+      expect(after).toBe(before);
+    }
+
+    // Successful delete: applications and all per-app rows go; orphan candidates go too.
+    const cands = (await ds.query(`SELECT DISTINCT "candidateId" AS id FROM applications WHERE id = ANY($1::uuid[])`, [notJoined])).map((x: any) => x.id);
+    const otherApps = (await ds.query(`SELECT DISTINCT "candidateId" AS id FROM applications WHERE "candidateId" = ANY($1::uuid[]) AND id <> ALL($2::uuid[])`, [cands, notJoined])).map((x: any) => x.id);
+    const orphans = cands.filter((c: string) => !otherApps.includes(c));
+    const r = await admin.post('/api/cv-bank/applications/delete').send({ ids: notJoined, reason: 'Clean-up' }).expect(200);
+    expect(r.body).toMatchObject({ deleted: true, counts: { applications: notJoined.length } });
+    expect((await ds.query(`SELECT count(*)::int AS n FROM applications WHERE id = ANY($1::uuid[])`, [notJoined]))[0].n).toBe(0);
+    for (const t of ['candidate_documents', 'screening_runs', 'extraction_runs', 'candidate_stages', 'candidate_remarks', 'evaluation_marks', 'joining_records']) {
+      expect((await ds.query(`SELECT count(*)::int AS n FROM ${t} WHERE "applicationId" = ANY($1::uuid[])`, [notJoined]))[0].n).toBe(0);
+    }
+    expect((await ds.query(`SELECT count(*)::int AS n FROM candidates WHERE id = ANY($1::uuid[])`, [orphans]))[0].n).toBe(0);
+    if (otherApps.length) {
+      expect((await ds.query(`SELECT count(*)::int AS n FROM candidates WHERE id = ANY($1::uuid[])`, [otherApps]))[0].n).toBeGreaterThan(0);
+    }
+    const [audit] = await ds.query(`SELECT "oldValues", "newValues" FROM audit_events WHERE action = 'candidate.bulk_delete' ORDER BY "createdAt" DESC LIMIT 1`);
+    expect(audit.newValues).toMatchObject({ reason: 'Clean-up', deleted: { applications: notJoined.length } });
+  });
+
+  // Last, because it removes the main requisition and its vacancy.
+  it('only the Super Admin deletes a requisition; its vacancy and everything under it go too (owner, 2026-11-08)', async () => {
+    const hr = await as('hr.manager');
+    await hr.post(`/api/vacancies/${ids.vacancy}/cvs`).attach('files', Buffer.from('Nadia Islam\nnadia.delete@example.com\n01711000999\nEDUCATION\nBSc in CSE, 2020'), 'nadia.txt').expect(201);
+    await jobs.drain();
+    const v = [ids.vacancy];
+    const apps = (await ds.query(`SELECT id, "candidateId" FROM applications WHERE "vacancyId" = $1`, v)) as any[];
+    expect(apps.length).toBeGreaterThan(0);
+    const shared = (await ds.query(`SELECT DISTINCT "candidateId" AS id FROM applications WHERE "candidateId" = ANY($1::uuid[]) AND "vacancyId" <> $2`, [apps.map((a) => a.candidateId), ids.vacancy])).map((x: any) => x.id);
+    const only = apps.map((a) => a.candidateId).filter((c) => !shared.includes(c));
+    expect(only.length).toBeGreaterThan(0);
+
+    for (const u of ['hr.manager', 'requester.ict', 'approval.admin', 'corporate.hr']) {
+      await (await as(u)).post(`/api/requisitions/${ids.req}/delete`).send({ reason: 'not allowed' }).expect(403);
+    }
+    const admin = await as('admin');
+    const row = (await admin.get('/api/requisitions?pageSize=100').expect(200)).body.items.find((r: any) => r.id === ids.req);
+    expect(row.vacancy).toMatchObject({ applications: apps.length });
+    expect((await hr.get('/api/requisitions?pageSize=100').expect(200)).body.items.find((r: any) => r.id === ids.req).vacancy).toBeNull();
+    expect((await admin.get(`/api/requisitions/${ids.req}`).expect(200)).body.vacancy).toBeUndefined(); // no longer shown on the requisition
+    await admin.post(`/api/requisitions/${ids.req}/delete`).send({ reason: '' }).expect(400); // a reason is required
+
+    const r = (await admin.post(`/api/requisitions/${ids.req}/delete`).send({ reason: 'Raised by mistake' }).expect(200)).body;
+    expect(r).toMatchObject({ deleted: true, vacancyNo: row.vacancy.vacancyNo, counts: { applications: apps.length, candidates: only.length } });
+    await admin.get(`/api/requisitions/${ids.req}`).expect(404);
+    const left = async (sql: string, p: unknown[]) => (await ds.query(sql, p))[0].n;
+    expect(await left(`SELECT count(*)::int AS n FROM vacancies WHERE id = $1`, v)).toBe(0);
+    expect(await left(`SELECT count(*)::int AS n FROM job_posts WHERE "vacancyId" = $1`, v)).toBe(0);
+    expect(await left(`SELECT count(*)::int AS n FROM applications WHERE "vacancyId" = $1`, v)).toBe(0);
+    expect(await left(`SELECT count(*)::int AS n FROM approval_actions WHERE "requisitionId" = $1`, [ids.req])).toBe(0);
+    for (const t of ['candidate_documents', 'screening_runs', 'extraction_runs', 'evaluation_marks', 'candidate_stages', 'joining_records', 'email_events']) {
+      expect(await left(`SELECT count(*)::int AS n FROM ${t} WHERE "applicationId" = ANY($1::uuid[])`, [apps.map((a) => a.id)])).toBe(0);
+    }
+    expect(await left(`SELECT count(*)::int AS n FROM candidates WHERE id = ANY($1::uuid[])`, [only])).toBe(0);
+    expect(await left(`SELECT count(*)::int AS n FROM candidates WHERE id = ANY($1::uuid[])`, [shared])).toBe(shared.length); // applied elsewhere: kept
+    const [audit] = await ds.query(`SELECT "oldValues", "newValues" FROM audit_events WHERE action = 'requisition.delete' AND "entityId" = $1`, [ids.req]);
+    expect(audit.newValues).toMatchObject({ reason: 'Raised by mistake', deleted: { applications: apps.length } });
+    expect(audit.oldValues).toMatchObject({ vacancyNo: row.vacancy.vacancyNo });
   });
 });

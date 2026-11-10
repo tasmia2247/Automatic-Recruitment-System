@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { FormView } from '@/components/FormView';
 import { Alert, Badge, Button, Card, ConfirmDialog, Field, LinkButton, Loaded, Modal, PageHeader, Select, Table, Td, Textarea, useAction, useLoad } from '@/components/ui';
@@ -16,7 +16,6 @@ type Dialog = null | 'approve' | 'reject' | 'return' | 'cancel';
  */
 export function RequisitionDetail({ inbox = false }: { inbox?: boolean }) {
   const { id } = useParams<{ id: string }>();
-  const router = useRouter();
   const { can, user } = useAuth();
   const state = useLoad(() => api(`/requisitions/${id}`), [id]);
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -37,11 +36,6 @@ export function RequisitionDetail({ inbox = false }: { inbox?: boolean }) {
       approve: 'Approved.', reject: 'Requisition rejected.', return: 'Returned to requester for clarification.', cancel: 'Requisition cancelled.',
     }[kind]);
     if (r) { setDialog(null); state.reload(); }
-  };
-
-  const createVacancy = async () => {
-    const r = await act.run(() => api(`/hr-queue/${id}/vacancy`, { method: 'POST' }));
-    if (r) router.push(`/vacancies/${r.vacancy.id}`);
   };
 
   const saveCorp = async (r: any) => {
@@ -98,16 +92,7 @@ export function RequisitionDetail({ inbox = false }: { inbox?: boolean }) {
               </Card>
             )}
 
-            {!inbox && r.status === 'Sent to HR' && can(P.HR_QUEUE) && (
-              <Card className="mb-4" title="HR recruitment">
-                {r.vacancy ? (
-                  <p className="text-sm">Vacancy <Link className="font-medium text-brand-700 hover:underline" href={`/vacancies/${r.vacancy.id}`}>{r.vacancy.vacancyNo}</Link> <Badge>{r.vacancy.status}</Badge></p>
-                ) : can(P.VACANCY_CREATE) ? (
-                  <div className="flex items-center gap-3"><span className="text-sm text-muted">All mandatory approvals are complete.</span><Button busy={act.busy} onClick={createVacancy}>Create vacancy</Button></div>
-                ) : <p className="text-sm text-muted">Awaiting HR vacancy creation.</p>}
-              </Card>
-            )}
-
+            {/* The "HR recruitment" card (vacancy link / Create vacancy) was removed (owner, 2026-11-08); vacancies are made from the HR Approved Queue. */}
             <div className="grid gap-4 lg:grid-cols-3">
               <Card className="lg:col-span-2" title="Form No. 01">
                 <FormView r={r} />
@@ -179,8 +164,8 @@ export function RequisitionDetail({ inbox = false }: { inbox?: boolean }) {
   );
 }
 
-/** Approve / return / reject with a comment and an optional supporting document (signed note, email, minutes). */
-function DecisionDialog({ open, title, message, confirmLabel, danger, requireReason, reasonLabel, busy, error, onConfirm, onClose }: {
+/** Approve / return / reject with a comment and an optional supporting document (signed note, email, minutes). Also used by the Approver inbox. */
+export function DecisionDialog({ open, title, message, confirmLabel, danger, requireReason, reasonLabel, busy, error, onConfirm, onClose }: {
   open: boolean; title: string; message: string; confirmLabel: string; danger?: boolean; requireReason?: boolean; reasonLabel: string;
   busy?: boolean; error?: string | null; onConfirm: (reason: string, file: File | null) => void; onClose: () => void;
 }) {

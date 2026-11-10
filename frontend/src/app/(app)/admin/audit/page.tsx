@@ -15,7 +15,7 @@ export default function AuditPage() {
   const set = (k: string, v: string) => { setF({ ...f, [k]: v }); setPage(1); };
   return (
     <>
-      <PageHeader title="Audit log" subtitle="Read-only record of critical actions with actor, time and old → new values." />
+      <PageHeader title="Logs" subtitle="Read-only record of critical actions with actor, time and old → new values." />
       <Card pad={false}>
         <div className="flex flex-wrap gap-3 border-b border-line p-3">
           <Input className="max-w-xs" placeholder="Search record, actor…" value={f.q} onChange={(e) => set('q', e.target.value)} />

@@ -1,7 +1,8 @@
 import * as path from 'path';
+import { docKind } from '../common/file-kind';
 import { layoutPdf, readPdfPages } from './pdf-layout';
 
-export const EXTRACTOR_VERSION = 'rules-2.0';
+export const EXTRACTOR_VERSION = 'rules-2.2'; // 2.2 (2026-11-09): Word .doc files; name from the closing signature
 
 export interface ExtractedCv {
   name: string | null;
@@ -39,8 +40,25 @@ export interface ExtractHints {
 
 export interface CvText { text: string; nameHint: string | null }
 
+/**
+ * Text whose fonts carry no character map comes out as control codes ("\u001f\u001e..."), not letters: such a CV cannot be
+ * read and must be reviewed by hand, rather than extracted as if it were empty.
+ */
+function assertReadable(t: CvText): CvText {
+  const visible = t.text.replace(/\s+/g, '');
+  const junk = (visible.match(/[\u0000-\u001f�]/g) ?? []).length;
+  if (visible.length && junk / visible.length > 0.3) {
+    throw new Error('The CV text cannot be read (the PDF fonts have no text mapping, or it is a scanned image). Please review it manually.');
+  }
+  return t;
+}
+
 /** Reads a stored CV: its text in reading order, plus layout hints. Throws on unreadable/unsupported content. */
 export async function readCv(buffer: Buffer, fileName: string): Promise<CvText> {
+  return assertReadable(await readCvText(buffer, fileName));
+}
+
+async function readCvText(buffer: Buffer, fileName: string): Promise<CvText> {
   const ext = path.extname(fileName).toLowerCase();
   if (ext === '.txt') return { text: buffer.toString('utf8'), nameHint: null };
   if (ext === '.pdf') {
@@ -58,13 +76,80 @@ export async function readCv(buffer: Buffer, fileName: string): Promise<CvText> 
       await parser.destroy();
     }
   }
-  if (ext === '.docx') {
-    const mammoth = await import('mammoth');
-    const res = await mammoth.extractRawText({ buffer });
-    return { text: res.value, nameHint: null };
-  }
-  throw new Error(`Text extraction is not supported for ${ext} files; please review manually or upload PDF/DOCX.`);
+  if (ext === '.docx') return readDocx(buffer);
+  if (ext === '.doc') return readDoc(buffer);
+  throw new Error(`Text extraction is not supported for ${ext} files; please review manually or upload PDF, DOC or DOCX.`);
 }
+
+async function readDocx(buffer: Buffer): Promise<CvText> {
+  const mammoth = await import('mammoth');
+  const res = await mammoth.extractRawText({ buffer });
+  return { text: res.value, nameHint: null };
+}
+
+/**
+ * Old Word CVs (owner, 2026-11-09). Word 97-2003 files are read with `word-extractor` (body, headers, footnotes, text boxes);
+ * a ".doc" that is really a DOCX, an RTF or a saved web page is read as what it is.
+ */
+async function readDoc(buffer: Buffer): Promise<CvText> {
+  const kind = docKind(buffer);
+  if (kind === 'docx') return readDocx(buffer);
+  if (kind === 'rtf') return { text: rtfToText(buffer.toString('latin1')), nameHint: null };
+  if (kind === 'html') return { text: htmlToText(buffer.toString('utf8')), nameHint: null };
+  if (kind !== 'ole') throw new Error('This .doc file is not a Word document that can be read; open it in Word and save it as PDF or DOCX.');
+  const WordExtractor = (await import('word-extractor')).default;
+  const doc = await new WordExtractor().extract(buffer);
+  const parts = [doc.getHeaders({ includeFooters: false }), doc.getBody(), doc.getTextboxes({ includeHeadersAndFooters: false }), doc.getFootnotes(), doc.getEndnotes()];
+  // Word keeps paragraph marks as \r and table cells as \x07; tabs and non-breaking spaces become plain spaces.
+  const text = parts.filter((p) => p?.trim()).join('\n')
+    .replace(/\r\n?/g, '\n').replace(/\x07/g, '\t').replace(/[\x0b\x0c]/g, '\n').replace(/ /g, ' ').replace(/[\x00-\x08\x0e-\x1f]/g, '');
+  return { text, nameHint: null };
+}
+
+/** Plain text of an RTF document: control words dropped, \par as line breaks, \'xx and \uN characters decoded. */
+export function rtfToText(rtf: string): string {
+  let out = '';
+  let depth = 0;
+  const skipAt: number[] = [];
+  for (let i = 0; i < rtf.length; i++) {
+    const ch = rtf[i];
+    if (ch === '{') { depth++; continue; }
+    if (ch === '}') { if (skipAt.length && skipAt[skipAt.length - 1] === depth) skipAt.pop(); depth--; continue; }
+    if (ch === '\\') {
+      const m = /^\\(?:([a-zA-Z]+)(-?\d+)? ?|'([0-9a-fA-F]{2})|(.))/.exec(rtf.slice(i, i + 40));
+      if (!m) continue;
+      i += m[0].length - 1;
+      if (skipAt.length) continue;
+      const [, word, num, hex, sym] = m;
+      if (word) {
+        if (['fonttbl', 'colortbl', 'stylesheet', 'info', 'pict', 'object', 'header', 'footer', 'themedata', 'colorschememapping', 'latentstyles', 'datastore', 'xmlnstbl', 'listtable', 'listoverridetable', 'rsidtbl', 'generator'].includes(word)) skipAt.push(depth);
+        else if (word === 'par' || word === 'line' || word === 'row') out += '\n';
+        else if (word === 'tab' || word === 'cell') out += '\t';
+        else if (word === 'u' && num) { out += String.fromCharCode((Number(num) + 65536) % 65536); if (rtf[i + 1] === '?') i++; }
+      } else if (hex) out += String.fromCharCode(parseInt(hex, 16));
+      else if (sym === '*') skipAt.push(depth);
+      else if (sym === '~') out += ' ';
+      else if (sym && '\\{}'.includes(sym)) out += sym;
+      continue;
+    }
+    if (skipAt.length || ch === '\r' || ch === '\n') continue;
+    out += ch;
+  }
+  return out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Plain text of a web page saved as .doc: block tags as line breaks, entities decoded. */
+export function htmlToText(html: string): string {
+  return html
+    .replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|tr|li|h[1-6]|table|section)>/gi, '\n').replace(/<\/t[dh]>/gi, '\t')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Closing lines of a letter-style CV, never a name ("Thanking You", "Yours faithfully", "Signature"). */
+const CLOSING = /\b(?:thank|sincere|yours|faithful|regards|signature|declar|truly|obedient)/i;
 
 /** Converts a stored CV file to plain text. Throws on unreadable/unsupported content. */
 export async function cvToText(buffer: Buffer, fileName: string): Promise<string> {
@@ -73,11 +158,19 @@ export async function cvToText(buffer: Buffer, fileName: string): Promise<string
 
 // ------------------------------------------------------------------ helpers
 
+/**
+ * Bullet marks CVs start a line with: the usual ones, emoji ticks, and the private-use symbols of Wingdings / Symbol fonts
+ * (U+E000-U+F8FF), which PDFs of Word CVs often carry ("" before every skill).
+ */
+const BULLET_CHARS = '\\-*•▪●◦➢►➤✓✔✅❖■□◆◇○→⇒⮚\\uE000-\\uF8FF';
+const LEAD_BULLETS = new RegExp(`^[\\s${BULLET_CHARS}]+`);
+/** A line or cell that really starts with a bullet mark (not just with spaces). */
+const BULLET_START = new RegExp(`^\\s*[${BULLET_CHARS}]`);
 function clean(s: string | undefined | null, max = 2000) {
-  const t = (s ?? '').replace(/\s+/g, ' ').replace(/^[\s,;:|\-–—•▪●◦*]+|[\s,;|\-–—•▪●◦*]+$/g, '').trim();
+  const t = (s ?? '').replace(/\s+/g, ' ').replace(new RegExp(`^[\\s,;:|–—${BULLET_CHARS}]+|[\\s,;|\\-–—•▪●◦*\\uE000-\\uF8FF]+$`, 'g'), '').trim();
   return t ? t.slice(0, max) : null;
 }
-const bullet = (l: string) => l.replace(/^(?:[-*•▪●◦➢►✓✔]|\d{1,2}[.)])\s*/, '').trim();
+const bullet = (l: string) => l.replace(LEAD_BULLETS, '').replace(/^\d{1,2}[.)]\s*/, '').trim();
 const decodeHtml = (s: string) => s.replace(/<\/?\s*[a-z]+[^>]*>?/gi, ' ').replace(/<\/?$/g, ' ').replace(/^\s*p>/i, ' ')
   .replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 const uniq = (xs: string[]) => {
@@ -85,8 +178,8 @@ const uniq = (xs: string[]) => {
   return xs.filter((x) => { const k = x.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
 };
 
-/** Splits a line into its cells: tab gaps from the PDF layout and " | " separators of rebuilt table rows. */
-const cellsOf = (l: string) => l.split(/\t/).map((c) => c.trim()).filter(Boolean);
+/** Splits a line into its cells: tab gaps from the PDF layout and " | " separators ("AIUB | 2021 | CGPA: 3.79"). */
+const cellsOf = (l: string) => l.split(/\t|\s+\|\s+/).map((c) => c.replace(/^\|\s*|\s*\|$/g, '').trim()).filter(Boolean);
 /** Cells of a rebuilt table row ("Exam Title: BSc | Institute: X") by label. */
 function tableRow(l: string): Record<string, string> | null {
   if (!/^(?:exam title|training title|training|certification|language)\s*:/i.test(l) || !l.includes(' | ')) return null;
@@ -104,10 +197,10 @@ type SectionKind = 'experience' | 'education' | 'skills' | 'training' | 'certifi
 
 const SECTION_RES: [SectionKind, RegExp][] = [
   // Checked first: these name "experience" or "skills" but are not the work history or skill list.
-  ['other', /^(?:leadership\s*(?:&|and)\s*)?extra\s*-?\s*curricul(?:ar|um)(?:\s+activities|\s+experiences?)?|^(?:career|job)\s+objectives?$|^objectives?$|^(?:career|professional|executive)\s+summary$|^summary(?:\s+of\s+(?:qualifications?|accomplish\s*ment))?$|^summery\s+of(?:\s+accomplish\s*ment)?$|^profile$|^(?:personal\s+)?profile\s+summary$|^about\s+me$|^special\s+qualifications?$|^contact(?:\s+(?:me|details|info(?:rmation)?))?$|^languages?(?:\s+(?:proficiency|skills?))?$|^career\s+and\s+application\s+information$|^declaration$|^hobbies?$|^interests$|^projects?$|^achievements?$|^awards?(?:\s*(?:&|and)\s*achievements?)?$|^customers$|^business\s+travel$|^responsibilit(?:y|ies)$|^key\s+responsibilities$|^signature$/i],
-  ['experience', /^(?:(?:work|working|professional|employment|job|career|industrial|relevant|internship)\s+)?(?:experiences?|history)$|^employment(?:\s+(?:history|record))?$|^career\s+history$|^experiences?\s+(?:details|summary)$/i],
+  ['other', /^(?:leadership\s*(?:&|and)\s*)?extra\s*-?\s*curricul(?:ar|um)(?:\s+activities|\s+experiences?)?|^(?:career|job)\s+objectives?$|^objectives?$|^(?:career|professional|executive)\s+summary$|^summary(?:\s+of\s+(?:qualifications?|accomplish\s*ment))?$|^summery\s+of(?:\s+accomplish\s*ment)?$|^profile$|^(?:self|career|professional|personal|my)\s+profile$|^(?:personal\s+)?profile\s+summary$|^about\s+me$|^special\s+qualifications?$|^contact(?:\s+(?:me|details|info(?:rmation)?))?$|^languages?(?:\s+(?:proficiency|skills?))?$|^career\s+and\s+application\s+information$|^declaration$|^hobbies?$|^interests$|^projects?$|^achievements?$|^awards?(?:\s*(?:&|and)\s*achievements?)?$|^customers$|^(?:selected\s+)?(?:global\s+)?brands?(?:\s+exposure)?$|^buyers?(?:\s+handled)?$|^(?:key\s+)?clients$|^business\s+travel$|^responsibilit(?:y|ies)$|^key\s+responsibilities$|^signature$/i],
+  ['experience', /^(?:(?:work|working|professional|employment|job|career|industrial|relevant|internship)\s+){0,2}(?:experiences?|history)$|^employment(?:\s+(?:history|record))?$|^career\s+history$|^experiences?\s+(?:details|summary)$/i],
   ['education', /^(?:education(?:al)?(?:\s+(?:qualifications?|background|details|summary))?|academic(?:\s+(?:qualifications?|background|profile|records?|credentials|details))?|academic\s*\/\s*education|educational\s+qualifications?)$/i],
-  ['skills', /^(?:(?:core|key|technical|computer|it|professional|soft|application|relevant)\s+)?skills?(?:\s*(?:&|and)(?:\s*(?:competencies|interests|expertise|abilities|tools))?)?$|^applicationskills?$|^(?:fields?\s+of\s+)?expertise$|^competencies$|^skills?\s+summary$/i],
+  ['skills', /^(?:(?:core|key|technical|computer|it|professional|soft|software|application|relevant|digital)\s+)?skills?(?:\s*(?:&|and)(?:\s*(?:competencies|interests|expertise|abilities|tools))?)?$|^applicationskills?$|^(?:fields?\s+of\s+)?expertise$|^(?:core\s+|key\s+)?competencies$|^key\s+proficiencies$|^skills?\s+summary$|^(?:digital|software|design|technical)(?:\s*(?:&|and)\s*\w+)?\s+tools$/i],
   ['training', /^(?:professional\s+)?trainings?(?:\s+(?:summa?e?ry|attended|programs?|details))?$|^trainings?\s*(?:&|and)\s*(?:certifications?|courses?)$|^courses?(?:\s*(?:&|and)\s*trainings?)?$|^workshops?$/i],
   ['certifications', /^(?:professional\s+)?(?:certifications?|certificates?)$|^professional\s+qualifications?$|^licen[sc]es?(?:\s*(?:&|and)\s*certifications?)?$/i],
   ['references', /^references?(?:\s*\(s\))?$|^referees?$/i],
@@ -122,6 +215,7 @@ function headingKind(s: string): SectionKind | null {
 }
 
 interface Section { kind: SectionKind; lines: string[] }
+const JOB_SUBHEADING = /^(?:key\s+|job\s+|main\s+)?(?:responsibilit(?:y|ies)|achievements?|duties(?:\s*\/\s*responsibilities)?)(?:\s*(?:&|and)\s*achievements?)?$/i;
 
 /** Cuts the CV into sections at its headings. A heading may carry text after a colon, a tab or a bullet. */
 function sectionize(lines: string[]): { sections: Section[]; kindOf: SectionKind[] } {
@@ -134,6 +228,8 @@ function sectionize(lines: string[]): { sections: Section[]; kindOf: SectionKind
       const m = l.match(/^(.{3,45}?)\s*(?::\s+|\t|\s(?=•))(.+)$/);
       if (m && (kind = headingKind(m[1]))) rest = m[2];
     }
+    // "Key Responsibilities:" / "Key Achievements:" or "Selected brands: Zara, H&M" under a job belong to that job, not a section of their own.
+    if (kind === 'other' && sections[sections.length - 1].kind === 'experience' && (rest || JOB_SUBHEADING.test(l.replace(/[:：]\s*$/, '').trim()))) kind = null;
     if (kind) {
       sections.push({ kind, lines: rest ? [rest] : [] });
       kindOf.push(kind);
@@ -154,27 +250,34 @@ const DEGREES: [number, RegExp][] = [
   [1, /^m\.?\s?phil\b/i],
   [3, /^(?:pgd\w*|post\s*-?\s*graduate\s+diploma)\b/i],
   [4, /^(?:mbbs|bds)\b/i],
-  [2, /^(?:masters?\b|e\.?\s?m\.?\s?b\.?\s?a\b|m\.?\s?b\.?\s?a\b|m\.?\s?sc\b|m\.?\s?s\.?\s?s\b|m\.?\s?b\.?\s?s\b|m\.?\s?com\b|m\.?\s?a\b|m\.?\s?eng\b|m\.?\s?s\b|ll\.?\s?m\b|m\.?\s?pharm\b|m\.?\s?ed\b|m\.?\s?tech\b)/i],
+  // "MS" is a master's, but "MS Office" / "MS Excel" in a skills list is software.
+  [2, /^(?:masters?\b|e\.?\s?m\.?\s?b\.?\s?a\b|m\.?\s?b\.?\s?a\b|m\.?\s?sc\b|m\.?\s?s\.?\s?s\b|m\.?\s?b\.?\s?s\b|m\.?\s?com\b|m\.?\s?a\b|m\.?\s?eng\b|m\.?\s?s\b(?!\s*-?\s*(?:office|excel|word|power\s*point|powerpoint|outlook|project|access|teams|dynamics|sql|visio|windows|dos|paint))|ll\.?\s?m\b|m\.?\s?pharm\b|m\.?\s?ed\b|m\.?\s?tech\b)/i],
   [4, /^(?:bachelor|b\.?\s?sc\b|b\.?\s?b\.?\s?a\b|b\.?\s?b\.?\s?s\b|b\.?\s?s\.?\s?s\b|b\.?\s?com\b|b\.?\s?a\b|b\.?\s?eng\b|b\.?\s?tech\b|b\.?\s?pharm\b|b\.?\s?ed\b|b\.?\s?s\b|ll\.?\s?b\b|honou?rs\b|undergraduate\b|graduat(?:e|ion)\b|degree\s+pass\b|fazil\b|kamil\b)/i],
   [5, /^diploma\b/i],
-  [6, /^(?:h\.?\s?s\.?\s?c\b|higher\s+secondary|alim\b|a\s*-?\s*levels?\b|intermediate\b)/i],
-  [7, /^(?:s\.?\s?s\.?\s?c\b|secondary\s+school|dakhil\b|o\s*-?\s*levels?\b|matriculation\b)/i],
+  // Misspellings seen in real CVs ("Higher Secoundary Certificet"); P.U.C. and S.S.L.C. are the Indian HSC and SSC.
+  [6, /^(?:h\.?\s?s\.?\s?c\b|higher\s+seco?u?ndary|alim\b|a\s*-?\s*levels?\b|intermediate\b|p\.?\s?u\.?\s?c\b)/i],
+  [7, /^(?:s\.?\s?s\.?\s?c\b|s\.?\s?s\.?\s?l\.?\s?c\b|seco?u?ndary\s+school|dakhil\b|o\s*-?\s*levels?\b|matriculation\b)/i],
 ];
+/** Drops what may stand before a degree: bullets, ticks, a year or a numbering ("2017| BBA", "• MBA", "✅ Master of Arts"). */
+const degreeStart = (s: string) => s.replace(/^[^A-Za-z]+(?=[A-Za-z])/, '').trim();
 /** 0 = PhD ... 4 = bachelor, 5 = diploma, 6 = HSC, 7 = SSC; -1 when the text does not start with a degree. */
 export const degreeRank = (s: string) => {
-  const t = s.replace(/^[\s\d/.\-–]+(?=[A-Za-z])/, '').trim(); // a leading year: "2019 - 2024 Undergraduate"
+  const t = degreeStart(s);
   for (const [r, re] of DEGREES) if (re.test(t)) return r;
   return -1;
 };
 /** The degree word(s) a text starts with ("BSc", "Bachelor", "MBA"), or null. */
 export const degreeToken = (s: string) => {
-  const t = s.replace(/^[\s\d/.\-–]+(?=[A-Za-z])/, '').trim();
+  const t = degreeStart(s);
   for (const [, re] of DEGREES) { const m = t.match(re); if (m) return m[0]; }
   return null;
 };
-const INSTITUTION = /\b(?:university|college|institute|institution|polytechnic|school|academy|madrasa|madrasah|iut|buet|butex|aiub|nsu|bracu?)\b/i;
+const INSTITUTION = /\b(?:university|college|institute|institution|polytechnic|school|academy|madrasa|madrasah|madrasha|coll?age|iut|buet|butex|buft|bift|nift|aiub|nsu|bracu?)\b/i;
 const RESULT = /\b(?:c?gpa|cgpa|out\s+of|class|division|grade|marks?|first|second|third|distinction|passed|appeared|awarded|enrolled|running|result)\b|\d{1,3}(?:\.\d+)?\s*%/i;
-const INCOMPLETE = /\b(?:enrolled|appeared|running|pursuing|ongoing|continuing|current(?:ly)?|expected|level\s*\d|semester|final\s+year|\d(?:st|nd|rd|th)\s+year)\b/i;
+export const INCOMPLETE = /\b(?:enrolled|appeared|running|pursuing|ongoing|continuing|current(?:ly)?|expected|in\s+progress|level\s*\d|semester|final\s+year|\d(?:st|nd|rd|th)\s+year)\b/i;
+/** Labels written before an education value ("Name of the University : X", "Institute: X", "Major: Y"). */
+const INSTITUTE_LABEL = /^(?:name\s+of\s+(?:the\s+)?(?:university|college|institut\w*|school|board)|institut(?:e|ion)(?:\s+name)?|university|college|school|board)\s*[:\-–]\s*/i;
+const SUBJECT_LABEL = /^(?:subject|major|concentration(?:\s*\/\s*major)?|discipline|department|group|specialization)\s*[:\-–]\s*(.+)$/i;
 const GENERIC_FIELD = /^(?:arts?|science|sciences|commerce|business(?:\s+(?:studies|administration))?|social\s+sciences?|engineering|laws?|philosophy|education|fine\s+arts?|honou?rs|degree|pass|madrasa|madrasah|general|n\/?a|none)$/i;
 
 /** Bdjobs fills the major column with these when there is no subject. */
@@ -192,7 +295,8 @@ export function subjectOf(title: string, rest: string | null, restFirst = false)
   if (restFirst && ok(own, false)) return own;
   const fromTitle = [
     title.match(/(?:\s|-)(?:in|on)(?:\s|-)+([A-Za-z][A-Za-z&/.\-' ]{1,70})/i)?.[1],
-    title.match(/\(([A-Za-z][A-Za-z&/.\-' ]*\s[A-Za-z&/.\-' ]+)\)/)?.[1],
+    // "MBA (Accounting)", "M.Com (Finance)"; not the degree's own abbreviation "(M.B.A)", "(BSS)" or "(Hons.)".
+    [title.match(/\(([A-Za-z][A-Za-z&/.\-' ]{2,70})\)/)?.[1]].find((v) => v && !/^[A-Z.\s'’]{1,9}$/.test(v) && !/\bhons?\b|honou?rs/i.test(v)),
     title.match(/^(?:bachelor|master|doctor)s?\s+of\s+([A-Za-z][A-Za-z&/.\-' ]{1,70})/i)?.[1]?.replace(/^(?:science|arts?|commerce|business)\s+in\s+/i, ''),
   ];
   for (const t of fromTitle) {
@@ -205,9 +309,11 @@ export function subjectOf(title: string, rest: string | null, restFirst = false)
 /** "CGPA: 3.45 out of 4.00", "CGPA : 2.68 (out of 4)", "3.62 out of 4", "CGPA – 3.50 (-A)". */
 function gpaOf(s: string): { raw: string; value: number; scale: number | null } | null {
   const m = s.match(/\bc?gpa\b\s*[:\-–—]?\s*(\d(?:\.\d{1,2})?)(?:\s*\(?\s*(?:\/|out\s+of)\s*(\d(?:\.\d{1,2})?)\s*\)?)?/i)
-    ?? s.match(/\b(\d\.\d{1,2})\s*\(?\s*(?:\/|out\s+of)\s*(\d(?:\.\d{1,2})?)\s*\)?/i);
+    ?? s.match(/\b(\d\.\d{1,2})\s*\(?\s*(?:\/|out\s+of|on\s+a\s+scale\s+of)\s*(\d(?:\.\d{1,2})?)\s*\)?/i);
   if (!m) return null;
-  return { raw: m[0].replace(/\s+/g, ' ').trim(), value: Number(m[1]), scale: m[2] ? Number(m[2]) : null };
+  // A closing bracket the match took without its opening one ("(CGPA 3.39/4.00)" read from "CGPA") is dropped.
+  const raw = m[0].replace(/\s+/g, ' ').trim();
+  return { raw: !raw.includes('(') ? raw.replace(/\s*\)$/, '') : raw, value: Number(m[1]), scale: m[2] ? Number(m[2]) : null };
 }
 
 function educationEntries(lines: string[]): EduEntry[] {
@@ -222,32 +328,50 @@ function educationEntries(lines: string[]): EduEntry[] {
       title, rank: degreeRank(title), result: result ? result.replace(/\s+/g, ' ') : null,
       subject: subjectOf(title, row['concentration/major'] ?? row['major'] ?? row['concentration'] ?? null, true),
       institute: clean(row['institute'] ?? row['institution'] ?? row['board']),
-      year: row['pass.year'] ?? row['pas.year'] ?? row['passing year'] ?? row['year'] ?? null,
+      year: row['pass.year'] ?? row['pas.year'] ?? row['pass year'] ?? row['pass. year'] ?? row['passing year'] ?? row['year'] ?? null,
       incomplete: INCOMPLETE.test(result ?? ''),
     });
   }
   if (entries.length) return entries;
 
   // Free text: each degree line opens an entry; the lines under it (up to the next degree) hold its institute and result.
-  const starts = lines.map((l, i) => ({ i, cell: cellsOf(l).find((c) => degreeRank(c) >= 0) })).filter((x) => x.cell);
+  // A labelled degree ("Graduation : BBA") counts by its value; "Dakhil Madrasha" is an institute, not a degree.
+  const degreeCell = (c: string) => {
+    const v = c.match(/^[A-Za-z .]{2,30}\s*:\s*(.+)$/)?.[1];
+    const cell = v && degreeRank(v) >= 0 ? v : c;
+    return degreeRank(cell) >= 0 && !/^\W*(?:dakhil|alim|fazil|kamil)\s+madras/i.test(cell) ? cell : null;
+  };
+  const starts = lines.map((l, i) => ({ i, cell: cellsOf(l).map(degreeCell).find(Boolean) })).filter((x) => x.cell);
   starts.forEach(({ i, cell }, n) => {
-    const end = Math.min(n + 1 < starts.length ? starts[n + 1].i : lines.length, i + 6);
-    const titleText = cell!.replace(/^[\s\d/.\-–]+(?=[A-Za-z])/, '');
+    const end = Math.min(n + 1 < starts.length ? starts[n + 1].i : lines.length, i + 7);
+    const text = degreeStart(cell!);
+    // "MBA in HRM from BRAC University with CGPA 2.74 out of 4 in 2019", "PGDHRM under AIUB 2025".
+    const from = text.match(/\s(?:from|at|under)\s+(.+?)(?=\s+(?:with|in\s+(?:19|20)\d{2})\b|\s*[,(;]|\s+(?:19|20)\d{2}|\s*$)/i)?.[1];
+    // "M.Com (Finance) – Gulbarga University", "BSc - Dhaka University": what follows a spaced dash is the institute.
+    const [titleText, ...dashed] = text.split(/\s+[–—]\s+|\s+-\s+(?=(?:19|20)\d{2}|[^,]*\b(?:university|college|institute|school|madras\w*)\b)/i);
     const [titlePart, ...afterComma] = titleText.split(/,\s*/);
-    const title = clean(titlePart.split(/\s+(?:from|at)\s+|\s+-\s+(?=\d{4}|[A-Z][a-z]+\s+(?:University|College))|\s*\(\s*c?gpa|\s+c?gpa\b/i)[0].replace(/\s*[-–]\s*\d{4}\s*$/, ''))!;
-    const pieces = [...afterComma, ...cellsOf(lines[i]).filter((c) => c !== cell), ...lines.slice(i + 1, end).flatMap(cellsOf)]
-      .filter((c) => !/^affiliated\b/i.test(c));
-    const insts = pieces.filter((c) => INSTITUTION.test(c));
+    const title = clean(titlePart.split(/\s+(?:from|at|under)\s+|\s*\(\s*c?gpa|\s+c?gpa\b/i)[0]
+      .replace(/[\s,\-–(]*\(?(?:19|20)\d{2}\)?\s*$/, ''))!; // "Masters of Laws (LL.M) 2019", "MBA in Management -2018"
+    const labelled: string[] = [];
+    const pieces = [...afterComma, ...dashed, ...(from ? [from] : []), ...cellsOf(lines[i]).filter((c) => !c.includes(cell!)), ...lines.slice(i + 1, end).flatMap(cellsOf)]
+      .filter((c) => !/^affiliated\b/i.test(c))
+      .map((c) => { const s = c.match(SUBJECT_LABEL)?.[1]; if (s) labelled.push(s); return c.replace(INSTITUTE_LABEL, ''); });
+    const insts = pieces.filter((c) => INSTITUTION.test(c) && !SUBJECT_LABEL.test(c));
     // Some CVs write the institute on the line above the degree.
     const above = i > 0 && (n === 0 || starts[n - 1].i < i - 1) ? cellsOf(lines[i - 1]).find((c) => INSTITUTION.test(c) && degreeRank(c) < 0) : undefined;
-    const institute = clean(insts.find((c) => !/\bboard\b/i.test(c)) ?? above ?? insts[0]);
-    const all = [titleText, ...pieces].join(' \n ');
+    // Without what follows the name on the same cell: "| 2021", "CGPA: 3.63( 2025)", a trailing year.
+    let institute = clean((insts.find((c) => !/\bboard\b/i.test(c)) ?? above ?? insts[0])?.replace(/\s*\|.*$/, '').replace(/[\s,(]*\b(?:c?gpa|result)\b.*$/i, '').replace(/[\s,]*(?:19|20)\d{2}\s*$/, ''));
+    // An institute name wrapped onto the next line ("BANGLADESH UNIVERSITY OF" / "TEXTILES").
+    const at = institute ? pieces.findIndex((c) => clean(c) === institute) : -1;
+    if (institute && at >= 0 && /\b(?:of|and|&|for|the)$/i.test(institute) && pieces[at + 1] && /^[A-Za-z&.' ]{3,40}$/.test(pieces[at + 1])) institute = clean(`${institute} ${pieces[at + 1]}`);
+    const all = [text, ...pieces].join(' \n ');
     const g = gpaOf(all);
     const marks = all.match(/(?:first|second|third)\s+(?:class|division)[^\n]{0,20}|\d{1,3}(?:\.\d+)?\s*%/i)?.[0];
-    const subjectLine = rankSubject(afterComma[0], pieces, institute);
+    const subjectLine = labelled.find((s) => !GENERIC_FIELD.test(s.trim())) ?? rankSubject(afterComma[0], pieces, institute);
     entries.push({
       title, rank: degreeRank(title), institute,
-      subject: subjectOf(title, subjectLine),
+      // "PGDHRM", "PGDBA": the subject is written into the degree's own abbreviation.
+      subject: subjectOf(title, subjectLine, labelled.length > 0) ?? title.match(/^\W*PGD([A-Z]{2,6})\b/)?.[1] ?? null,
       result: g ? g.raw : clean(marks, 40),
       year: all.match(/\b(?:19|20)\d{2}\b(?!.*\b(?:19|20)\d{2}\b)/)?.[0] ?? null,
       incomplete: INCOMPLETE.test(all),
@@ -275,18 +399,66 @@ function bestDegree(entries: EduEntry[]): EduEntry | null {
 // ------------------------------------------------------------------ experience
 
 const TITLE_WORDS = /\b(?:officer|manager|executive|engineer|assistant|asst\.?|director|head|supervisor|in-?charge|incharge|developer|merchandiser|designer|operator|coordinator|co-ordinator|specialist|analyst|intern(?:ship)?|trainee|lead|leader|consultant|administrator|accountant|president|secretary|chief|ceo|cfo|coo|cto|gm|agm|dgm|associate|technician|controller|planner|programmer|auditor|inspector|cutter|tailor|helper|chemist|worker|representative|clerk|teacher|lecturer|professor|instructor|advisor|adviser|architect|deputy|member|admin)\b/i;
-const ORG_WORDS = /\b(?:ltd\.?|limited|plc|inc\.?|llc|group|company|co\.|corporation|corp\.?|mills?|industries|industry|bank|textiles?|fashions?|apparels?|garments?|knit\w*|composite|washing|wash|denims?|dyeing|sweaters?|international|enterprises?|holdings|trading|solutions?|technologies|pharma\w*|university|college|school|foundation|associates|agency|factory|plant|organization|organisation|ngo|services)\b/i;
+const ORG_WORDS = /\b(?:ltd\.?|limited|plc|inc\.?|llc|group|company|co\.|(?<=&\s?)co|corporation|corp\.?|mills?|industries|industry|bank|textiles?|fashions?|apparels?|garments?|knit\w*|composite|washing|wash|denims?|dyeing|sweaters?|international|enterprises?|holdings|trading|solutions?|technologies|pharma\w*|university|college|school|foundation|associates|agency|factory|plant|organization|organisation|ngo|services)\b/i;
 
 const MONTH = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\.?';
-const DATE = `(?:(?:\\d{1,2}(?:st|nd|rd|th)?[\\s/.\\-]+)?${MONTH},?\\s*(?:\\d{1,2},?\\s*)?(?:19|20)\\d{2}|(?:\\d{1,2}[/.\\-]){1,2}(?:19|20)\\d{2}|(?:19|20)\\d{2})`;
-const END = `(?:present|current(?:ly)?|continuing|running|till\\s*(?:now|date|today)|to\\s+date|now|ongoing|${DATE})`;
-const DATE_RANGE = new RegExp(`\\(?\\s*(?:${DATE}|${MONTH})\\s*(?:-|–|—|to|till|until)\\s*${END}\\s*\\)?|${MONTH}\\s*(?:-|–|—|to)\\s*${MONTH}\\s*(?:19|20)\\d{2}`, 'i');
+// "May'25" / "Jan’25" (a two-digit year after an apostrophe) as well as full dates.
+const DATE = `(?:${MONTH}\\s*['’‘]\\s*\\d{2}\\b|(?:\\d{1,2}(?:st|nd|rd|th)?[\\s/.\\-]+)?${MONTH},?\\s*(?:\\d{1,2},?\\s*)?(?:19|20)\\d{2}|(?:\\d{1,2}[/.\\-]){1,2}(?:19|20)\\d{2}|(?:19|20)\\d{2})`;
+const END = `(?:present|current(?:ly)?|continu(?:e|ing)|running|till\\s*(?:now|date|today)|to\\s+date|now|ongoing|${DATE}|${MONTH}\\s*\\d{2}\\b)`;
+const DATE_RANGE = new RegExp(`\\(?\\s*(?:${DATE}|${MONTH})\\s*(?:-|–|—|‐|‑|−|to|till|until)\\s*${END}\\s*\\)?|${MONTH}\\s*(?:-|–|—|‐|to)\\s*${MONTH}\\s*(?:19|20)\\d{2}`, 'i');
 
-const TITLE_LABEL = /^(?:#\s*)?(?:(?:current|present|last|latest|previous|former)\s+)?(?:job\s+position|position|designation|job\s*title|role|post)\s*[:\-–]\s*(.{2,100})$/i;
+const TITLE_LABEL = /^(?:#\s*)?(?:(?:current|present|last|latest|previous|former)\s+)?(?:job\s+position|position(?:\s+held)?|designation(?:\s+held)?|job\s*title|job\s+role|role|post)\s*[:\-–]\s*(.{2,100})$/i;
 const ORG_LABEL = /^(?:#\s*)?(?:(?:current|present|last|previous|former)\s+)?(?:company(?:\s+name)?|organi[sz]ation(?:\s+name)?|employer|institution\s+name|office)\s*[:\-–]\s*(.{2,120})$/i;
 
-interface Job { title: string | null; org: string | null }
-const jobText = (j: Job) => [j.title, j.org].filter(Boolean).join(', ');
+/** A job held: its title, organization and, when written, its start and end ("Feb 2024", "Present"). */
+interface Job { title: string | null; org: string | null; from?: string | null; to?: string | null }
+/** A date range split into its start and end. */
+const RANGE_PARTS = new RegExp(`(${DATE}|${MONTH})\\s*(?:-|–|—|‐|‑|−|to|till|until)\\s*(${END})`, 'i');
+const periodOf = (s: string | undefined): Pick<Job, 'from' | 'to'> => {
+  const m = s?.match(RANGE_PARTS);
+  return m ? { from: clean(m[1]), to: clean(m[2]) } : {};
+};
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const ONGOING = /present|current|continu|running|till|to\s+date|\bnow\b|ongoing/i;
+/** A start or end date as a month count (year * 12 + month); a year alone counts from mid-year. */
+function monthOf(s: string, today: Date): number | null {
+  if (ONGOING.test(s)) return today.getUTCFullYear() * 12 + today.getUTCMonth();
+  let year = s.match(/(?:19|20)\d{2}/)?.[0];
+  if (!year) { const two = s.match(/['’‘]\s*(\d{2})\b|\b(\d{2})\s*$/); if (two) year = `20${two[1] ?? two[2]}`; }
+  if (!year) return null;
+  const word = s.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i)?.[1];
+  const num = s.match(/^\s*(?:\d{1,2}[/.\-])?(\d{1,2})[/.\-](?:19|20)\d{2}/)?.[1];
+  const month = word ? MONTHS.indexOf(word.toLowerCase()) : num && +num >= 1 && +num <= 12 ? +num - 1 : 6;
+  return +year * 12 + month;
+}
+/**
+ * Years of experience worked out from the jobs' dates, for CVs that do not state a total: overlapping jobs count once,
+ * internships do not count. Null when no job has a usable start date.
+ */
+export function yearsFromJobs(jobs: Job[], today: Date): number | null {
+  const now = today.getUTCFullYear() * 12 + today.getUTCMonth();
+  const spans = jobs.filter((j) => j.from && !/\bintern(?:ship)?\b/i.test(j.title ?? ''))
+    .map((j) => [monthOf(j.from!, today), j.to ? monthOf(j.to, today) : null] as const)
+    .filter((x): x is readonly [number, number] => x[0] !== null && x[1] !== null && x[0] >= 1970 * 12 && x[1] >= x[0] && x[0] <= now)
+    .map(([a, b]) => [a, Math.min(b, now) + 1] as [number, number])
+    .sort((a, b) => a[0] - b[0]);
+  if (!spans.length) return null;
+  let months = 0;
+  let [s, e] = spans[0];
+  for (const [a, b] of spans.slice(1)) {
+    if (a <= e) e = Math.max(e, b);
+    else { months += e - s; [s, e] = [a, b]; }
+  }
+  months += e - s;
+  const years = Math.round((months / 12) * 10) / 10;
+  return years > 0 && years <= 50 ? years : null;
+}
+/** Cells of a job line that are neither title nor company. */
+const NOT_JOB = /^(?:full[\s-]?time|part[\s-]?time|internship|contract(?:ual)?|remote|on-?site|onshore|offshore|hybrid|permanent|temporary|freelance)$/i;
+/** Place words that, with BD_PLACE, make a cell a bare location ("Konabari", "Kerala | India" is not caught; "Dhaka, Bangladesh" is). */
+const PLACE_WORD = /^(?:india|pakistan|sri\s*lanka|vietnam|china|konabari|ashulia|kaliakoir|chattogram|\d{4})$/i;
+const isPlace = (c: string) => c.split(/[\s,]+/).filter(Boolean).every((w) => BD_PLACE.test(w) || PLACE_WORD.test(w));
+const jobText = (j: Job) => [j.title, j.org].filter(Boolean).join(', ') + (j.from ? ` (${j.from} – ${j.to ?? '?'})` : '');
 const stripDuration = (s: string) => s.replace(/\s*\(\s*\d+(?:\.\d+)?\s*(?:yrs?|years?|months?)\s*\)\s*$/i, '').trim();
 
 /** Bdjobs entries: "1. Deputy Manager (9.1yrs)" / "(5 Oct 2017 - Continuing)" / "Soorty Textile (BD) Ltd.". */
@@ -297,7 +469,7 @@ function bdjobsJobs(lines: string[]): Job[] {
     const next = lines[i + 1] ?? '';
     if (!m || !/^\(.*(?:19|20)\d{2}.*\)$/.test(next)) return;
     const org = lines[i + 2] && !/^(?:area of expertise|duties)/i.test(lines[i + 2]) ? lines[i + 2] : null;
-    jobs.push({ title: clean(m[1]), org: clean(org) });
+    jobs.push({ title: clean(m[1]), org: clean(org), ...periodOf(next) });
   });
   return jobs;
 }
@@ -319,8 +491,19 @@ function labelledJobs(lines: string[]): Job[] {
       near = n.match(ORG_LABEL)?.[1];
       if (near) break;
     }
+    // "CUTTING EDGE INDUSTRIES LTD. (MBM GROUP)" over "Designation: Asst. Manager": an unlabelled company line next to it.
+    if (!near && firstOrg === -1) near = [lines[i - 1], lines[i + 1]].find((n) => n && ORG_WORDS.test(n) && !/[:•▪]/.test(n) && !BULLET_START.test(n) && n.length <= 90 && !DATE_RANGE.test(n));
+    // The job's dates: the nearest date line after it ("Duration: 01 Feb 2024 – Till Date"), else before it, never past another job.
+    let period: Pick<Job, 'from' | 'to'> = periodOf(t);
+    for (const dir of [1, -1]) {
+      for (let k = 1; !period.from && k <= 3; k++) {
+        const n = lines[i + dir * k];
+        if (!n || TITLE_LABEL.test(n)) break;
+        period = periodOf(n);
+      }
+    }
     const [title, atOrg] = t.split(/\s+\|\s+/)[0].split(/\s+(?:at|@)\s+/);
-    jobs.push({ title: clean(stripDuration(title)), org: clean(atOrg ?? near) });
+    jobs.push({ title: clean(stripDuration(title)), org: clean(atOrg ?? near), ...period });
   });
   return jobs;
 }
@@ -331,7 +514,9 @@ function splitJob(pieces: string[]): Job {
   let org: string | null = null;
   const at = pieces.join(' ').match(/^(.{2,80}?)\s+(?:at|@)\s+(.{2,100})$/);
   if (at && !ORG_WORDS.test(at[1])) return { title: clean(at[1]), org: clean(at[2]) };
-  const parts = pieces.flatMap((p) => p.split(/\s*\|\s*|\s*\(\s*|\s*\)\s*|,\s+(?=[A-Z])/)).map((p) => clean(p)).filter((p): p is string => !!p && p.length > 1);
+  // Without numbering ("1.Chief Creative Coordinator") and bare places ("Dhaka", "Bangladesh.").
+  const parts = pieces.flatMap((p) => p.split(/\s*\|\s*|\s*\(\s*|\s*\)\s*|,\s+(?=[A-Z])/)).map((p) => clean(p.replace(/^\s*\d{1,2}\.\s*(?=[A-Za-z])/, '')))
+    .filter((p): p is string => !!p && p.length > 1 && !isPlace(p.replace(/\.$/, '')) && !/^\d+(?:\.\d+)?\s*(?:yrs?|years?|months?)$/i.test(p));
   const orgs = parts.filter((p) => ORG_WORDS.test(p) && !(TITLE_WORDS.test(p) && !/\b(?:ltd|limited|group|plc|inc)\b/i.test(p)));
   const others = parts.filter((p) => !orgs.includes(p));
   // "BEXIMCO | MANAGER | DESIGN & PD": a short leading name before the title is the organization.
@@ -348,23 +533,38 @@ function datedJobs(lines: string[]): Job[] {
   const jobs: Job[] = [];
   lines.forEach((l, i) => {
     if (!DATE_RANGE.test(l)) return;
-    const rest = cellsOf(l.replace(DATE_RANGE, '\t')).map((c) => c.replace(/\(\s*\)/g, '').replace(/[,;:\-–]\s*$/, '').trim()).filter(Boolean);
+    // What is left of the date line, without "[Duration:", "Full-time" or a bare location ("Dhaka, Bangladesh").
+    const rest = cellsOf(l.replace(DATE_RANGE, '\t'))
+      .map((c) => c.replace(/\(\s*\)|[[\]]/g, '').replace(/^(?:duration|period|tenure|time|date)\s*:?\s*/i, '').replace(/[,;:\-–]\s*$/, '').trim())
+      .filter((c) => c && !NOT_JOB.test(c) && !isPlace(c));
     const pieces = [...rest];
     let job = splitJob(pieces);
     for (let k = i + 1; k < Math.min(lines.length, i + 4) && (!job.title || !job.org); k++) {
       const n = lines[k];
-      if (DATE_RANGE.test(n) || n.length > 70 || (n.match(/\b[a-z]{3,}\b/g) ?? []).length >= 3 || /[:•▪]/.test(n) || /\.$/.test(n) || /^[a-z]/.test(n)) break;
+      if (DATE_RANGE.test(n) || BULLET_START.test(n) || n.length > 70 || (n.match(/\b[a-z]{3,}\b/g) ?? []).length >= 3 || /[:•▪]/.test(n) || (/\.$/.test(n) && !ORG_WORDS.test(n)) || /^[a-z]/.test(n)) break;
       pieces.push(n);
       job = splitJob(pieces);
     }
-    if (job.title || job.org) jobs.push(job);
+    // Still missing: title and company on the line above the dates ("1. Florence Group (Golden Stitch Design Ltd.)\tSavar, Dhaka",
+    // "Senior Executive – Finance & Accounts | Fast Corporation Pvt. Ltd.", "• Executive Accounts & Admin"). With a title already
+    // found, only a line that names a company counts (not the last duty of the job before).
+    const prev = lines[i - 1];
+    const titleBullet = !!prev && BULLET_START.test(prev) && TITLE_WORDS.test(prev) && prev.split(/\s+/).length <= 8;
+    if ((!job.org || !job.title) && prev && !DATE_RANGE.test(prev) && (!BULLET_START.test(prev) || titleBullet)
+      && !/:$/.test(prev) && !(/\.$/.test(prev) && !ORG_WORDS.test(prev)) && prev.length <= 100) {
+      const cells = cellsOf(bullet(prev)).map((c) => clean(c.replace(/^\d{1,2}\.\s*/, ''))).filter((c): c is string => !!c && !isPlace(c) && !NOT_JOB.test(c));
+      const before = splitJob([...cells, ...pieces]);
+      const useful = job.title ? !job.org && cells.some((c) => ORG_WORDS.test(c)) : !!(before.title || before.org);
+      if (useful) job = before;
+    }
+    if (job.title || job.org) jobs.push({ ...job, ...periodOf(l) });
   });
   return jobs;
 }
 
 // ------------------------------------------------------------------ main
 
-const BD_PLACE = /\b(?:road|rd\.?|house|flat|holding|sector|block|lane|village|vill\.?|para|upazila|upazilla|thana|union|district|dist\.?|post|p\.?\s?o\.?|dhaka|gazipur|chittagong|chattogram|narayanganj|savar|uttara|mirpur|tongi|ashulia|khulna|rajshahi|sylhet|barishal|barisal|rangpur|mymensingh|cumilla|comilla|bogura|bogra|tangail|kushtia|jessore|jashore|noakhali|feni|pabna|dinajpur|bangladesh)\b/i;
+const BD_PLACE = /\b(?:road|rd\.?|house|flat|holding|sector|block|lane|village|vill\.?|para|upazila|upazilla|thana|union|district|dist\.?|post|p\.?\s?o\.?|dhaka|gazipur|chittagong|chattogram|narayanganj|savar|uttara|mirpur|tongi|ashulia|khulna|rajshahi|sylhet|barishal|barisal|rangpur|mymensingh|cumilla|comilla|bogura|bogra|tangail|kushtia|jessore|jashore|noakhali|feni|pabna|dinajpur|bangladesh|bagerhat|bandarban|barguna|bhola|brahmanbaria|chandpur|chapai\s*nawabganj|chuadanga|cox'?s\s*bazar|faridpur|gaibandha|gopalganj|habiganj|jamalpur|jhalokat?hi|jhenaidah|joypurhat|khagrachh?ari|kishoreganj|kurigram|la[kx]shmipur|lalmonirhat|madaripur|magura|manikganj|meherpur|moulvibazar|munshiganj|naogaon|narail|narsingdi|natore|netrokona|nilphamari|panchagarh|patuakhali|pirojpur|rajbari|rangamati|satkhira|shariatpur|sherpur|sirajganj|sunamganj|thakurgaon|keraniganj|jatrabari|mohammadpur|dhanmondi|gulshan|banani|badda|khilkhet|nikunja|rampura|motijheel|tejgaon|bashundhara|joydebpur|kashimpur|kaliakoir|konabari|valuka|bhaluka)\b/i;
 const looksLikeAddress = (s: string) => /,/.test(s) && (BD_PLACE.test(s) || /\b\d{4}\b/.test(s)) && !/@|https?:|www\./i.test(s) && !phoneOf(s);
 
 function phoneOf(s: string): string | null {
@@ -387,6 +587,9 @@ function parseDate(s: string): Date | null {
   if (m && +m[2] <= 12) return new Date(Date.UTC(+m[3], +m[2] - 1, +m[1]));
   m = s.match(/\b((?:19|20)\d{2})[\-/.](\d{1,2})[\-/.](\d{1,2})\b/);
   if (m) return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  // Month and year only ("Date of Birth : Aug 1990"): the first of that month.
+  m = s.match(/\b([A-Za-z]{3,9})\.?,?\s+((?:19|20)\d{2})\b/);
+  if (m && mon(m[1]) >= 0) return new Date(Date.UTC(+m[2], mon(m[1]), 1));
   return null;
 }
 
@@ -398,7 +601,8 @@ export function extractFromText(text: string, hints: ExtractHints = {}): Extract
   const lines = text.split(/\r?\n/)
     .map((l) => l.replace(/ /g, ' ').replace(/[ \f\v]+/g, ' ').replace(/ *\t[\t ]*/g, '\t').replace(/\t(?=:)/g, ' ').trim())
     .map((l) => l.replace(/^(?:[A-Za-z] ){2,}[A-Za-z](?=\t|$)/, (m) => m.replace(/ /g, ''))) // "S K I L L S"
-    .filter((l) => l && !/^-- \d+ of \d+ --$/.test(l) && !/^page \d+(?: of \d+)?$/i.test(l));
+    // Page footers: "-- 2 of 3 --", "Page 2 of 3", "Md. Razaul karim ‐3 | P a g e".
+    .filter((l) => l && !/^-- \d+ of \d+ --$/.test(l) && !/^page \d+(?: of \d+)?$/i.test(l) && !/\|\s*p\s?a\s?g\s?e$/i.test(l));
   const { sections, kindOf } = sectionize(lines);
   const sectionLines = (...kinds: SectionKind[]) => sections.filter((s) => kinds.includes(s.kind)).flatMap((s) => s.lines);
   const own = lines.filter((_, i) => kindOf[i] !== 'references'); // the referees' contacts are not the candidate's
@@ -409,15 +613,27 @@ export function extractFromText(text: string, hints: ExtractHints = {}): Extract
   let phone: string | null = null;
   for (const l of own) if ((phone = phoneOf(l))) break;
   if (!phone) phone = clean(own.find((l) => /\b(?:mobile|phone|cell|contact|tel)\b/i.test(l))?.match(/\+?\d[\d\s-]{8,14}\d/)?.[0]);
+  // No Bangladeshi number: an international one with its country code near the top ("+971545856049", "+91 88677 57600").
+  if (!phone) {
+    const intl = own.slice(0, 15).join('\n').match(/\+(?!88)\d{1,3}[\s\-]?\d[\d\s\-]{6,13}\d/)?.[0];
+    if (intl && intl.replace(/\D/g, '').length >= 10) phone = `+${intl.replace(/\D/g, '')}`;
+  }
 
   // Name: the biggest text on the first page, else a "Name:" label, else the first line that reads like a name.
+  // Names are written in capitals or Title Case: a line with two or more words in lower case is a sentence ("A hard working person.").
   const nameLike = (s: string | null | undefined) => !!s && /^[A-Za-z][A-Za-z.\-' ]{2,60}$/.test(s) && s.split(/\s+/).length <= 6
+    && s.split(/\s+/).filter((w) => /^[a-z]/.test(w)).length < 2
     && !/curriculum|vitae|resume|\bcv\b/i.test(s) && !headingKind(s) && !TITLE_WORDS.test(s.replace(/^md\.?\s/i, ''));
-  let name = nameLike(hints.nameHint) ? clean(hints.nameHint) : null;
+  // "Resume of Jumman Ahmed", "CV of Arijit Roy", "Imniaj Ferdous (Jyoti)": the name without the title or the nickname.
+  const bare = (s: string | null | undefined) => s?.replace(/^(?:(?:curriculum\s+vitae|resume|résumé|cv|bio[\s-]?data)\s+(?:of\s+)?)/i, '')
+    .replace(/\s*\([A-Za-z .]{2,20}\)\s*$/, '').trim();
+  let name = nameLike(bare(hints.nameHint)) ? clean(bare(hints.nameHint)) : null;
   if (!name) {
     const label = own.map((l) => l.match(/^(?:full\s+|candidate'?s?\s+)?name\s*[:\-–]\s*([A-Za-z][A-Za-z.\-' ]{2,60})$/i)?.[1]).find(Boolean);
-    name = clean(label) ?? clean(own.slice(0, 10).find((l) => !/^job\s*title\b/i.test(l) && nameLike(l)));
+    name = clean(label) ?? clean(bare(own.slice(0, 10).find((l) => !/^job\s*title\b/i.test(l) && !/^(?:of|resume|cv)$/i.test(l) && !CLOSING.test(l) && nameLike(bare(l)))));
   }
+  // Still none: some CVs (often old Word files) put the name only under the closing signature, "A.M. Haider ( Khokon )".
+  if (!name) name = clean(bare([...own.slice(-8)].reverse().find((l) => !l.includes(':') && !CLOSING.test(l) && nameLike(bare(l)))));
 
   // ---- education
   const eduSection = sectionLines('education');
@@ -425,11 +641,12 @@ export function extractFromText(text: string, hints: ExtractHints = {}): Extract
   if (!entries.length) entries = educationEntries(own.filter((_, i) => own.slice(Math.max(0, i - 5), i + 1).some((l) => cellsOf(l).some((c) => degreeRank(c) >= 0))));
   const best = bestDegree(entries);
   const degree = clean(best?.title);
-  const specialization = clean(best?.subject);
-  const institution = clean(best?.institute ?? eduSection.flatMap(cellsOf).find((c) => INSTITUTION.test(c) && !/^affiliated/i.test(c)));
+  const specialization = clean(best?.subject?.replace(/\.$/, ''));
+  const institution = clean(best?.institute ?? eduSection.flatMap(cellsOf).find((c) => INSTITUTION.test(c) && !/^affiliated/i.test(c) && !SUBJECT_LABEL.test(c))?.replace(INSTITUTE_LABEL, ''));
   const education = entries.length
     ? clean(entries.slice(0, 5).map((e) => [
-      [e.title, e.subject && !e.title.includes(e.subject) ? e.subject : null].filter(Boolean).join(', '),
+      // The subject is added unless the title already has it as words ("PGDHRM" gets ", HRM"; "BSc in CSE" does not).
+      [e.title, e.subject && !` ${e.title.toLowerCase().replace(/[^a-z0-9&]+/g, ' ')} `.includes(` ${e.subject.toLowerCase().replace(/[^a-z0-9&]+/g, ' ').trim()} `) ? e.subject : null].filter(Boolean).join(', '),
       e.institute ? ` - ${e.institute}` : '',
       e.result || e.year ? ` (${[e.result, e.year].filter(Boolean).join(', ')})` : '',
     ].join('')).join('; '))
@@ -443,7 +660,7 @@ export function extractFromText(text: string, hints: ExtractHints = {}): Extract
   const expYears = flat.match(/total\s+(?:years?\s+of\s+)?(?:job\s+)?experience\s*[:\-]?\s*(\d{1,2}(?:\.\d{1,2})?)/i)
     ?? flat.match(/(\d{1,2}(?:\.\d)?)\s*\+?\s*(?:years?|yrs?)\s*(?:of\s+)?(?:\w+\s+){0,3}experience/i)
     ?? flat.match(/experience\s*[:\-]?\s*(\d{1,2}(?:\.\d)?)\s*\+?\s*(?:years?|yrs?)/i);
-  const totalExperienceYears = expYears ? Number(expYears[1]) : null;
+  const statedYears = expYears ? Number(expYears[1]) : null;
 
   const expLines = sectionLines('experience');
   const applied = own.slice(0, 5).filter((l) => /^job\s*title\s*:/i.test(l)); // Bdjobs: the post applied for, not a job held
@@ -451,7 +668,9 @@ export function extractFromText(text: string, hints: ExtractHints = {}): Extract
   let jobs = bdjobsJobs(expLines.length ? expLines : own);
   if (!jobs.length) jobs = labelledJobs(labelSource);
   if (!jobs.length && expLines.length) jobs = datedJobs(expLines);
-  jobs = jobs.filter((j) => j.title || j.org).map((j) => ({ title: j.title && j.title.replace(/\s+,/g, ','), org: j.org && j.org.replace(/\s+,/g, ',') }));
+  jobs = jobs.filter((j) => j.title || j.org).map((j) => ({ ...j, title: j.title && j.title.replace(/\s+,/g, ','), org: j.org && j.org.replace(/\s+,/g, ',') }));
+  // A stated total wins; otherwise the years are added up from the jobs' dates (owner, 2026-11-08), like the age from a date of birth.
+  const totalExperienceYears = statedYears ?? yearsFromJobs(jobs, hints.today ?? new Date());
   const lastPosition = clean(jobs[0]?.title, 300);
   const workplace = clean(jobs[0]?.org ?? labelSource.map((l) => l.match(ORG_LABEL)?.[1]).find(Boolean), 300);
   const previousJobs = jobs.length ? uniq(jobs.map(jobText)).slice(0, 10).join('\n') : null;
@@ -463,8 +682,10 @@ export function extractFromText(text: string, hints: ExtractHints = {}): Extract
   if (firstBullet !== -1 && rawSkills.some((l) => /<\/?p>|<\/$|^p>/i.test(l))) {
     rawSkills = rawSkills.filter((l, i) => i < firstBullet || /^[•▪●◦]/.test(l));
   }
-  const skillLines = rawSkills.map((l) => decodeHtml(l)).flatMap((l) => l.split(/\s*•\s*/)).map((l) => bullet(l.split('\t')[0]))
-    .filter((l) => l && !/^(?:description|fields?\s+of\s+skills?|no description provided|competencies|interests|total\s+(?:years?\s+of\s+)?experience\b.*)$/i.test(l));
+  // Two bulleted columns side by side ("• HR Operations\t• Training") are two items; a plain second cell (Bdjobs years) is dropped.
+  const skillLines = rawSkills.map((l) => decodeHtml(l)).flatMap((l) => l.split(/\s*[•-]\s*/))
+    .flatMap((l) => { const cs = l.split('\t'); return cs.length > 1 && cs.slice(1).every((c) => BULLET_START.test(c)) ? cs : [cs[0]]; }).map((l) => bullet(l))
+    .filter((l) => l && !/^(?:description|fields?\s+of\s+skills?|no description provided|competencies|interests|total\s+(?:years?\s+of\s+)?experience\b.*|\d{1,3}\s*%(?:\s+\d{1,3}\s*%)*)$/i.test(l));
   const skillItems: string[] = [];
   for (const l of skillLines) {
     const prev = skillItems[skillItems.length - 1];
@@ -474,7 +695,9 @@ export function extractFromText(text: string, hints: ExtractHints = {}): Extract
   const expertise = lines.flatMap((l, i) => (/^area\s+of\s+expertise\s*:?$/i.test(l) && lines[i + 1] ? lines[i + 1].split(/,\s*/) : []))
     .map((s) => s.replace(/\s*\(\s*\d+(?:\.\d+)?\s*(?:yrs?|years?|months?)\s*\)\s*/gi, '').trim()).filter(Boolean);
   const inlineSkills = skillItems.length ? [] : [flat.match(/\b(?<!of\s)(?:skills?|technical skills|key skills|expertise)[ \t]*[:\-][ \t]*([^.\n]{3,200})/i)?.[1] ?? ''];
-  const skillList = uniq([...skillItems, ...inlineSkills, ...expertise].map((s) => clean(s.replace(/\s+\./g, '.'), 200)).filter((s): s is string => !!s));
+  // The candidate's name printed after a sidebar skills list is not a skill.
+  const skillList = uniq([...skillItems, ...inlineSkills, ...expertise].map((s) => clean(s.replace(/\s+\./g, '.'), 200))
+    .filter((s): s is string => !!s && (!name || s.toLowerCase() !== name.toLowerCase())));
   const skills = skillList.length ? clean(skillList.slice(0, 30).join(', '), 1500) : null;
 
   // ---- trainings and certifications
@@ -491,7 +714,9 @@ export function extractFromText(text: string, hints: ExtractHints = {}): Extract
       certItems.push(extra ? `${t} (${extra})` : t);
       continue;
     }
-    const v = bullet(l.replace(/\t/g, ' '));
+    // A degree beside a certificate is the education column next to it ("• Certified KPI Professional\t• MBA in Management -2018").
+    const cells = l.split('\t');
+    const v = bullet((cells.length > 1 ? cells.filter((c) => degreeRank(c) < 0) : cells).join(' '));
     if (!v || /^(?:training\s+title|certification\s+institute|title\s+topic)/i.test(v)) continue;
     const prev = certItems[certItems.length - 1];
     if (prev && !/^[•\-*▪]/.test(l) && (/[,&(—–\-]$|\b(?:and|of|in|on|for)$/i.test(prev) || /^[a-z(]/.test(v))) certItems[certItems.length - 1] = `${prev} ${v}`;
@@ -539,7 +764,7 @@ export function extractFromText(text: string, hints: ExtractHints = {}): Extract
     // Bdjobs and many plain CVs: the address sits between the name and the phone / email lines.
     if (ni !== -1 && pi > ni && pi - ni <= 4) {
       const between = own.slice(ni + 1, pi).filter((l) => !TITLE_WORDS.test(l) || looksLikeAddress(l));
-      if (between.length && between.some((l) => looksLikeAddress(l) || BD_PLACE.test(l))) return clean(between.join(' '), 400);
+      if (between.length && between.some((l) => looksLikeAddress(l) || BD_PLACE.test(l))) return clean(between.join(' ').replace(/^(?:contact|address)\s*[:\-–]?\s*/i, ''), 400);
     }
     // A contact block: consecutive address-like lines (or first cells) near the top.
     const top = own.slice(0, 14).map((l) => cellsOf(l)[0] ?? '');

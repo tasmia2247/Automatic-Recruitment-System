@@ -1,12 +1,12 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { Brackets, DataSource } from 'typeorm';
+import { Brackets, DataSource, EntityManager } from 'typeorm';
 import { AuthUser } from '../common/auth';
 import { paged, skipTake } from '../common/pagination';
 import { P } from '../common/permissions';
 import { coordinatorScope, departmentScope } from '../common/scope';
 import { AuditService, diff, NotificationService } from '../common/services';
-import { Application, JoiningRecord, Vacancy } from '../database/entities';
+import { Application, JoiningRecord, ManpowerQuota, Vacancy } from '../database/entities';
 import { ApproveDto, JoinedQuery, JoiningUpdateDto } from './joining.dto';
 
 @Injectable()
@@ -66,14 +66,15 @@ export class JoiningService {
     const { entities, raw } = await qb.offset(skip).limit(take).getRawAndEntities();
     return paged(entities.map((j) => {
       const row = { ...this.view(j), approvedBy: raw.find((r) => r.j_id === j.id)?.approver ?? null };
-      return contacts ? row : { ...row, email: null, phone: null };
+      // Department users do not see the salary either (owner, 2026-11-09: kept with recruitment).
+      return contacts ? row : { ...row, email: null, phone: null, salary: null };
     }), total, q);
   }
 
   private view(j: JoiningRecord) {
     const a = j.application;
     return {
-      id: j.id, joiningDate: j.joiningDate, status: j.status, letterStatus: j.letterStatus, remarks: j.remarks, approvedAt: j.approvedAt, updatedAt: j.updatedAt,
+      id: j.id, joiningDate: j.joiningDate, status: j.status, letterStatus: j.letterStatus, salary: j.salary, remarks: j.remarks, approvedAt: j.approvedAt, updatedAt: j.updatedAt,
       applicationId: a.id, applicationNo: a.applicationNo, candidateNo: a.candidate.candidateNo, name: a.candidate.name,
       email: a.candidate.email, phone: a.candidate.phone, finalDecision: a.finalDecision, finalDecisionAt: a.finalDecisionAt,
       vacancyId: a.vacancy.id, vacancyNo: a.vacancy.vacancyNo, position: a.vacancy.positionTitle, vacancyStatus: a.vacancy.status,
@@ -81,7 +82,10 @@ export class JoiningService {
     };
   }
 
-  async update(id: string, dto: JoiningUpdateDto, me: AuthUser) {
+  async update(id: string, body: JoiningUpdateDto, me: AuthUser) {
+    // Only the fields the request sent; the salary is trimmed and an empty one clears it.
+    const dto = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)) as JoiningUpdateDto;
+    if (dto.salary !== undefined) dto.salary = dto.salary?.trim() || null;
     return this.ds.transaction(async (m) => {
       const j = await m.findOne(JoiningRecord, { where: { id }, lock: { mode: 'pessimistic_write' } });
       if (!j) throw new NotFoundException();
@@ -115,6 +119,10 @@ export class JoiningService {
       Object.assign(j, { status: 'Approved', joiningDate: dto.joiningDate, remarks: dto.remarks ?? j.remarks, approvedById: me.id, approvedAt: new Date() });
       await m.save(j);
       await this.audit.log(m, me, 'joining.approve', 'Application', j.applicationId, { label: app.applicationNo, old: { status: 'Pending' }, new: { status: 'Approved', joiningDate: dto.joiningDate } });
+
+      // A joining raises the present manpower of the dept-total and (if present) the matching designation row by one;
+      // a joining undone later drops them back (owner, 2026-11-09). Baseline stays whatever the admin set.
+      await this.adjustManpower(m, v, +1, me);
 
       // Mark the vacancy Filled once approved joinings reach its headcount.
       const joinedCount = before + 1;
@@ -151,7 +159,47 @@ export class JoiningService {
       Object.assign(j, { status: to, remarks });
       await m.save(j);
       await this.audit.log(m, me, action, 'Application', j.applicationId, { label: app.applicationNo, old, new: { status: to, remarks } });
+
+      // Rejecting a join below the headcount reopens the vacancy (owner, 2026-11-09): stale 'Filled'
+      // left Mail Scan and CV upload refusing new CVs even when no one actually joined any more.
+      if (from === 'Approved' && to !== 'Approved') {
+        const v = await m.findOneOrFail(Vacancy, { where: { id: app.vacancyId }, lock: { mode: 'pessimistic_write' } });
+        await this.adjustManpower(m, v, -1, me);
+        if (v.status === 'Filled') {
+          const joined = await m.createQueryBuilder(JoiningRecord, 'jr').innerJoin(Application, 'a', 'a.id = jr.applicationId')
+            .where(`a.vacancyId = :v AND jr.status = 'Approved'`, { v: v.id }).getCount();
+          if (joined < v.headcount) {
+            v.status = 'Screening';
+            await m.save(v);
+            await this.audit.log(m, me, 'vacancy.status_change', 'Vacancy', v.id, { label: v.vacancyNo, old: { status: 'Filled' }, new: { status: 'Screening', joined } });
+          }
+        }
+      }
       return j;
     });
+  }
+
+  /**
+   * Shifts the dept-total and (where it exists) matching designation quota row's `presentManpower` by `delta`.
+   * Rows that do not exist are left alone — an admin must create the baseline row first for auto-tracking to kick in.
+   * Audits every change so figures can be traced back to the joining that drove them.
+   */
+  private async adjustManpower(m: EntityManager, v: Vacancy, delta: number, me: AuthUser) {
+    const rows: { id: string; positionId: string | null; before: number | null }[] = await m.query(
+      `SELECT id, "positionId", "presentManpower" AS before FROM manpower_quotas
+        WHERE "companyId" = $1 AND "departmentId" = $2 AND ("positionId" IS NULL OR "positionId" = $3)
+        FOR UPDATE`,
+      [v.companyId, v.departmentId, v.positionId]);
+    for (const r of rows) {
+      const before = r.before ?? 0;
+      const after = Math.max(0, before + delta);
+      if (after === r.before) continue;
+      await m.update(ManpowerQuota, r.id, { presentManpower: after, updatedById: me.id });
+      await this.audit.log(m, me, 'quota.auto_update', 'ManpowerQuota', r.id, {
+        label: r.positionId ? 'Designation' : 'Department total',
+        old: { presentManpower: r.before },
+        new: { presentManpower: after, reason: delta > 0 ? 'joining.approved' : 'joining.reverted' },
+      });
+    }
   }
 }

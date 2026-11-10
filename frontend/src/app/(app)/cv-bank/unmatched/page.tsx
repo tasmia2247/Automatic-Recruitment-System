@@ -28,8 +28,8 @@ export default function UnmatchedCvsPage() {
   const act = useAction();
   const scan = useAction();
 
-  // Move targets: open vacancies, chosen by department, then designation, then the vacancy when several share both.
-  const open: any[] = useMemo(() => (vacancies.data?.items ?? []).filter((v: any) => !['Closed', 'Filled'].includes(v.status)), [vacancies.data]);
+  // Move targets: every vacancy that is not Closed (Filled is kept so HR can still top up the Waiting pool).
+  const open: any[] = useMemo(() => (vacancies.data?.items ?? []).filter((v: any) => v.status !== 'Closed'), [vacancies.data]);
   const departments = [...new Map(open.map((v) => [v.department.id, v.department.name])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
   const designations = [...new Set(open.filter((v) => v.department.id === target.departmentId).map((v) => v.positionTitle as string))].sort();
   const matches = open.filter((v) => v.department.id === target.departmentId && v.positionTitle === target.designation);

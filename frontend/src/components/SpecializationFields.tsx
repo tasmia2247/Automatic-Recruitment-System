@@ -25,8 +25,8 @@ export function SpecializationFields({ value, onChange, errors = {}, disabled }:
         hint="Minimum degree and subject, e.g. BSc in Textile Engineering. Put alternatives on separate lines; one of them is enough.">
         <Textarea rows={2} disabled={disabled} value={value.requiredEducation ?? ''} onChange={(e) => onChange('requiredEducation', e.target.value)} />
       </Field>
-      <Field label="Skills" error={errors.requiredSkills} hint="Separate with commas or new lines, e.g. MS Excel, AutoCAD. Each must be written in the CV.">
-        <Textarea rows={2} disabled={disabled} value={value.requiredSkills ?? ''} onChange={(e) => onChange('requiredSkills', e.target.value)} />
+      <Field label="Required Skills" error={errors.requiredSkills} hint="One per line, as on the job post, e.g. Basic knowledge of programming, networking and IT infrastructure. Short items can be separated by commas (MS Excel, AutoCAD). CVs are scored on the keywords found.">
+        <Textarea rows={4} disabled={disabled} value={value.requiredSkills ?? ''} onChange={(e) => onChange('requiredSkills', e.target.value)} />
       </Field>
       <Field label="Minimum experience (years)" error={errors.requiredExperienceYears} hint="Compared with the experience in the CV. Leave empty if not needed.">
         <Input type="number" min={0} max={60} step={0.5} disabled={disabled} value={value.requiredExperienceYears ?? ''} onChange={(e) => onChange('requiredExperienceYears', e.target.value)} />
@@ -43,7 +43,7 @@ export function SpecializationView({ value, empty = 'Not set' }: { value: Spec |
   if (!hasSpec(value)) return <span className="text-amber-700">{empty}</span>;
   const rows: [string, any][] = [
     ['Education / Qualification', value!.requiredEducation],
-    ['Skills', value!.requiredSkills],
+    ['Required Skills', value!.requiredSkills],
     ['Minimum experience', value!.requiredExperienceYears !== null && value!.requiredExperienceYears !== undefined && value!.requiredExperienceYears !== '' ? `${Number(value!.requiredExperienceYears)} years` : null],
     ['Other requirements', value!.specialization],
   ];

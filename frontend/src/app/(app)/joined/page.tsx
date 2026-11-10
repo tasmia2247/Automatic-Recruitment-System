@@ -29,7 +29,7 @@ export default function JoinedPage() {
         <Loaded state={state} empty={(d: any) => !d.items.length && 'No approved joinings match these filters.'}>
           {(d: any) => (
             <>
-              <Table head={['Candidate ID', 'Application ID', 'Name', 'Department', 'Company', 'Position', 'Vacancy', ...(hr ? ['Contact'] : []), 'Final selection', 'Joining date', 'Approved by']}>
+              <Table head={['Candidate ID', 'Application ID', 'Name', 'Department', 'Company', 'Position', 'Vacancy', ...(hr ? ['Contact'] : []), 'Final selection', 'Joining date', ...(hr ? ['Salary'] : []), 'Approved by']}>
                 {d.items.map((j: any) => (
                   <tr key={j.id}>
                     <Td>{j.candidateNo}</Td>
@@ -42,6 +42,7 @@ export default function JoinedPage() {
                     {hr && <Td className="text-xs">{j.email}<div className="text-muted">{j.phone}</div></Td>}
                     <Td className="text-xs">{j.finalDecision} · {fmtDate(j.finalDecisionAt)}</Td>
                     <Td className="whitespace-nowrap">{fmtDate(j.joiningDate)}</Td>
+                    {hr && <Td className="whitespace-nowrap text-sm">{j.salary ?? <span className="text-muted">—</span>}</Td>}
                     <Td className="text-xs">{j.approvedBy}<div className="text-muted">{fmtDateTime(j.approvedAt)}</div></Td>
                   </tr>
                 ))}

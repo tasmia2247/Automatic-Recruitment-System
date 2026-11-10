@@ -39,7 +39,8 @@ export class AuthService {
     }
     this.failures.delete(`${key}|${client}`);
     await this.users.update(user.id, { lastLoginAt: new Date() });
-    const token = await this.jwt.signAsync({ sub: user.id });
+    // `iatMs`: when the token was issued, to the millisecond, so a sign-out in the same second as the sign-in still ends it.
+    const token = await this.jwt.signAsync({ sub: user.id, iatMs: Date.now() });
     return { token, user };
   }
 

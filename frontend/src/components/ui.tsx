@@ -72,8 +72,8 @@ export function Button({ variant = 'primary', size = 'md', busy, className, chil
     <button
       {...rest}
       disabled={disabled || busy}
-      className={cx('inline-flex items-center justify-center gap-1.5 rounded-md border font-medium transition disabled:opacity-50 disabled:cursor-not-allowed',
-        size === 'sm' ? 'px-2.5 py-1 text-xs' : 'px-3.5 py-2 text-sm', styles, className)}
+      className={cx('inline-flex items-center justify-center gap-1.5 rounded-md border font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 disabled:opacity-50 disabled:cursor-not-allowed',
+        variant !== 'ghost' && 'shadow-sm', size === 'sm' ? 'px-2.5 py-1 text-xs' : 'px-3.5 py-2 text-sm', styles, className)}
     >
       {busy && <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />}
       {children}
@@ -83,7 +83,7 @@ export function Button({ variant = 'primary', size = 'md', busy, className, chil
 
 export function LinkButton({ href, children, variant = 'secondary' }: { href: string; children: React.ReactNode; variant?: 'primary' | 'secondary' }) {
   return (
-    <Link href={href} className={cx('inline-flex items-center gap-1.5 rounded-md border px-3.5 py-2 text-sm font-medium',
+    <Link href={href} className={cx('inline-flex items-center gap-1.5 rounded-md border px-3.5 py-2 text-sm font-medium shadow-sm transition',
       variant === 'primary' ? 'border-brand-600 bg-brand-600 text-white hover:bg-brand-700' : 'border-line bg-white hover:bg-slate-50')}>
       {children}
     </Link>
@@ -115,12 +115,22 @@ export function Badge({ children, tone }: { children: React.ReactNode; tone?: st
   return <span className={cx('inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset', TONES[t])}>{children}</span>;
 }
 
+/** A screening match score (0-100) as a number and a small bar, green from the pass mark. */
+export function ScoreBar({ score, passMark = 70 }: { score: number; passMark?: number }) {
+  return (
+    <div className="mt-1 w-24" title={`Match score ${score}% (pass mark ${passMark}%)`}>
+      <div className="flex justify-between text-[11px]"><span className="text-muted">Match</span><b className="tabular-nums">{score}%</b></div>
+      <div className="h-1.5 rounded-full bg-slate-200"><div className={cx('h-1.5 rounded-full', score >= passMark ? 'bg-emerald-500' : 'bg-amber-500')} style={{ width: `${Math.min(100, Math.max(0, score))}%` }} /></div>
+    </div>
+  );
+}
+
 export function Card({ title, actions, children, className, pad = true }: { title?: React.ReactNode; actions?: React.ReactNode; children: React.ReactNode; className?: string; pad?: boolean }) {
   return (
-    <section className={cx('rounded-lg border border-line bg-white shadow-sm', className)}>
+    <section className={cx('rounded-xl border border-line bg-white shadow-[0_1px_2px_rgba(16,24,40,0.05)]', className)}>
       {(title || actions) && (
         <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
-          <h2 className="text-sm font-semibold text-ink">{title}</h2>
+          <h2 className="text-[15px] font-semibold text-ink">{title}</h2>
           <div className="flex flex-wrap items-center gap-2">{actions}</div>
         </header>
       )}
@@ -131,12 +141,12 @@ export function Card({ title, actions, children, className, pad = true }: { titl
 
 export function PageHeader({ title, subtitle, actions, back }: { title: React.ReactNode; subtitle?: React.ReactNode; actions?: React.ReactNode; back?: { href: string; label: string } }) {
   return (
-    <div className="mb-5">
-      {back && <Link href={back.href} className="text-xs text-brand-700 hover:underline">&larr; {back.label}</Link>}
+    <div className="mb-6">
+      {back && <Link href={back.href} className="text-xs font-medium text-brand-700 hover:underline">&larr; {back.label}</Link>}
       <div className="mt-1 flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-ink">{title}</h1>
-          {subtitle && <div className="mt-0.5 text-sm text-muted">{subtitle}</div>}
+        <div className="min-w-0">
+          <h1 className="text-2xl font-semibold tracking-tight text-ink">{title}</h1>
+          {subtitle && <div className="mt-1 max-w-3xl text-sm text-muted">{subtitle}</div>}
         </div>
         {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
@@ -222,11 +232,11 @@ export function Table({ head, children, className }: { head: React.ReactNode[]; 
     <div className={cx('overflow-x-auto', className)}>
       <table className="min-w-full text-sm">
         <thead>
-          <tr className="border-b border-line bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-muted">
-            {head.map((h, i) => <th key={i} className="whitespace-nowrap px-3 py-2">{h}</th>)}
+          <tr className="border-b border-line bg-slate-50/80 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">
+            {head.map((h, i) => <th key={i} className="whitespace-nowrap px-3 py-2.5">{h}</th>)}
           </tr>
         </thead>
-        <tbody className="divide-y divide-line">{children}</tbody>
+        <tbody className="divide-y divide-line [&>tr]:transition-colors [&>tr:hover]:bg-slate-50/70">{children}</tbody>
       </table>
     </div>
   );
@@ -256,8 +266,8 @@ export function Modal({ open, title, onClose, children, footer, wide }: { open: 
   }, [open, onClose]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-4 pt-16" onMouseDown={onClose}>
-      <div role="dialog" aria-modal="true" aria-label={title} className={cx('w-full rounded-lg bg-white shadow-xl', wide ? 'max-w-4xl' : 'max-w-lg')} onMouseDown={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-4 pt-16 backdrop-blur-[2px]" onMouseDown={onClose}>
+      <div role="dialog" aria-modal="true" aria-label={title} className={cx('w-full rounded-xl bg-white shadow-2xl ring-1 ring-slate-900/5', wide ? 'max-w-4xl' : 'max-w-lg')} onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h3 className="font-semibold">{title}</h3>
           <button onClick={onClose} className="text-muted hover:text-ink" aria-label="Close">✕</button>
@@ -286,7 +296,7 @@ export function Pager({ page, pageSize, total, onPage }: { page: number; pageSiz
 export function Stat({ label, value, tone = 'brand', href, hint }: { label: string; value: React.ReactNode; tone?: 'brand' | 'green' | 'amber' | 'red' | 'violet' | 'slate'; href?: string; hint?: string }) {
   const c = { brand: 'text-brand-700', green: 'text-emerald-700', amber: 'text-amber-700', red: 'text-red-700', violet: 'text-violet-700', slate: 'text-ink' }[tone];
   const body = (
-    <div className="rounded-lg border border-line bg-white p-4 shadow-sm transition hover:border-brand-200">
+    <div className={cx('rounded-xl border border-line bg-white p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)] transition', href && 'hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-md')}>
       <div className="text-xs font-medium text-muted">{label}</div>
       <div className={cx('mt-1 text-2xl font-semibold tabular-nums', c)}>{value}</div>
       {hint && <div className="mt-0.5 text-xs text-muted">{hint}</div>}

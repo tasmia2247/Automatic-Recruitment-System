@@ -56,6 +56,9 @@ export class MailIntakeService {
   }
 
   private openJobs(): Promise<OpenJob[]> {
+    // Match against every Published job post regardless of vacancy status (owner, 2026-11-09): a
+    // Filled or Closed vacancy may still receive late CVs that are worth matching so HR can top up
+    // from the Waiting pool when Selected candidates do not join.
     return this.ds.query(
       `SELECT jp.id AS "jobPostId", jp."jobNo", jp.title, jp."emailSubject", v.id AS "vacancyId", v."vacancyNo",
               d.name AS department, d.code AS "departmentCode", c.name AS company, c.code AS "companyCode"
@@ -63,7 +66,7 @@ export class MailIntakeService {
          JOIN vacancies v ON v.id = jp."vacancyId"
          JOIN departments d ON d.id = v."departmentId"
          JOIN companies c ON c.id = v."companyId"
-        WHERE jp.status = 'Published' AND v.status NOT IN ('Closed', 'Filled')`);
+        WHERE jp.status = 'Published'`);
   }
 
   /** Scans the server's mail folder; each finished file moves to processed/ or failed/. */

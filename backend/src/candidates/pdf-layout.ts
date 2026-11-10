@@ -108,6 +108,8 @@ function readingOrder(page: PdfPage, pageNo: number): Line[] {
 }
 
 const HEADER_WORD = /^(?:exam\s*title|exam|degree|concentration\/?|major|concentration\s*\/\s*major|institute|institution|board|result|grade|pass\.?\s*year|pas\.?\s*year|passing\s+year|year|duration|achievement|training(?:\s+title)?|title|topic|country|location|certification|from|to|language|reading|writing|speaking)$/i;
+/** Halves of a two-line header label ("Exam" / "Title", "Pass" / "Year", "Passing" / "Year"). */
+const WRAPPED_WORD = /^(?:major|title|exam|pass\.?|passing|year|spec\.?)$/i;
 /** Header labels made of two words, which must stay one column. */
 const COMPOUND = /^(?:exam title|training title|pass\.? ?year|pas\.? ?year|passing year|concentration ?\/ ?major|concentration\/)$/i;
 
@@ -151,18 +153,23 @@ function rebuildTables(lines: Line[]): Line[] {
     const cols = headerCols(lines[i]);
     if (!cols) { out.push(lines[i]); continue; }
     const h = lines[i].h;
-    // Header labels that wrap onto the line just above or below ("Concentration/" over "Major", "Training" over "Title").
+    // Header labels that wrap onto the line just above or below ("Concentration/" over "Major", "Training" over "Title",
+    // "Exam" over "Title" and "Pass" over "Year" in Bdjobs exports). A wrapped word beside every column is a column of its own.
     for (const j of [i - 1, i + 1]) {
       const l = lines[j];
       if (!l || Math.abs(l.top - lines[i].top) > 1.8 * h || l.page !== lines[i].page) continue;
-      const fits = l.items.every((it) => HEADER_WORD.test(it.str.trim()) || /^(?:major|title)$/i.test(it.str.trim()));
-      if (!fits || !l.items.every((it) => cols.some((c) => it.x + it.w > c.x0 - 6 && it.x < c.x1 + 6))) continue;
+      if (!l.items.every((it) => HEADER_WORD.test(it.str.trim()) || WRAPPED_WORD.test(it.str.trim()))) continue;
+      const lo = Math.min(...cols.map((c) => c.x0)) - 80;
+      if (l.items.some((it) => it.x < lo)) continue; // a heading at the far left, not a header word
       for (const it of l.items) {
-        const c = cols.find((k) => it.x + it.w > k.x0 - 6 && it.x < k.x1 + 6)!;
-        c.label = j < i ? `${it.str.trim()} ${c.label}` : `${c.label} ${it.str.trim()}`;
+        const s = it.str.trim();
+        const c = cols.find((k) => it.x + it.w > k.x0 - 6 && it.x < k.x1 + 6);
+        if (c) c.label = j < i ? `${s} ${c.label}` : `${c.label} ${s}`;
+        else cols.push({ label: s, x0: it.x, x1: it.x + it.w, cx: it.x + it.w / 2 });
       }
       if (j < i) { if (out[out.length - 1] === l) out.pop(); } else i++;
     }
+    cols.sort((a, b) => a.x0 - b.x0);
     for (const c of cols) c.label = c.label.replace(/\s*\/\s*/g, '/').replace(/\s+/g, ' ');
 
     const body: Line[] = [];

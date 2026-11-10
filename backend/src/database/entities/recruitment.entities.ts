@@ -220,6 +220,8 @@ export class Application extends BaseEntity {
   // ---- Screening (automated) ----
   @Column({ type: 'varchar', length: 20, nullable: true }) screeningResult: ScreeningResult | null;
   @Column({ type: 'uuid', nullable: true }) latestScreeningRunId: string | null;
+  /** Keyword match score (0-100) of the latest run; null for runs without one. Used for ranking. */
+  @Column({ type: 'numeric', precision: 4, scale: 1, nullable: true, transformer: numeric }) screeningScore: number | null;
 
   // ---- HR shortlist decision (separate from screening result, SRS 10.6) ----
   @Column({ default: false }) shortlisted: boolean;
@@ -239,7 +241,13 @@ export class CandidateDocument extends BaseEntity {
   @Index() @Column('uuid') applicationId: string;
   @ManyToOne(() => Application, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'applicationId' }) application: Application;
   @Column('uuid') candidateId: string;
-  @Column({ length: 300 }) storageKey: string;
+  /** The stored file; null once it has been read and removed (owner, 2026-11-08: CV files are not kept). */
+  @Column({ type: 'varchar', length: 300, nullable: true }) storageKey: string | null;
+  /** The CV's text as read (reading order), kept instead of the file; screening and "Re-read CVs" use it. */
+  @Column({ type: 'text', nullable: true }) textContent: string | null;
+  /** The biggest text at the top of the PDF's first page, kept with the text for re-reading. */
+  @Column({ type: 'varchar', length: 200, nullable: true }) nameHint: string | null;
+  @Column({ type: 'timestamptz', nullable: true }) fileRemovedAt: Date | null;
   @Column({ length: 300 }) originalName: string;
   @Column({ length: 120 }) mimeType: string;
   @Column('int') size: number;
@@ -272,6 +280,10 @@ export interface CriterionResult {
   reason: string;
 }
 
+/** One part of the match score: its weight (after leaving out parts with no requirement) and what share of it the CV earned (0-1). */
+export interface ScorePart { key: 'skills' | 'responsibilities' | 'education' | 'experience'; label: string; weight: number; earned: number }
+export interface ScoreParts { parts: ScorePart[]; passMark: number }
+
 @Entity('screening_runs')
 export class ScreeningRun extends BaseEntity {
   @Index() @Column('uuid') applicationId: string;
@@ -284,6 +296,9 @@ export class ScreeningRun extends BaseEntity {
   @Column({ type: 'jsonb' }) results: CriterionResult[];
   @Column({ type: 'jsonb', nullable: true }) inputs: Record<string, any> | null;
   @Column({ type: 'uuid', nullable: true }) runById: string | null;
+  /** Keyword match score 0-100 (null on runs from before 2026-11-08) and how it was made up. */
+  @Column({ type: 'numeric', precision: 4, scale: 1, nullable: true, transformer: numeric }) score: number | null;
+  @Column({ type: 'jsonb', nullable: true }) scoreParts: ScoreParts | null;
 }
 
 @Entity('candidate_remarks')
@@ -433,6 +448,8 @@ export class JoiningRecord extends BaseEntity {
   @Column({ type: 'date', nullable: true }) joiningDate: string | null;
   @Index() @Column({ type: 'varchar', length: 20, default: 'Pending' }) status: 'Pending' | 'Approved' | 'Rejected';
   @Column({ type: 'varchar', length: 20, default: 'Not Prepared' }) letterStatus: 'Not Prepared' | 'Prepared' | 'Sent';
+  /** Agreed salary, entered on Joining Pending (owner, 2026-11-09). */
+  @Column({ type: 'varchar', length: 100, nullable: true }) salary: string | null;
   @Column({ type: 'text', nullable: true }) remarks: string | null;
   @Column({ type: 'uuid', nullable: true }) approvedById: string | null;
   @Column({ type: 'timestamptz', nullable: true }) approvedAt: Date | null;

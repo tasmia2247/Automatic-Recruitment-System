@@ -40,6 +40,23 @@ export class CandidatesController {
     return this.svc.rescreenVacancy(id, me);
   }
 
+  /** Reads every stored CV of the vacancy again with the current extractor, then screens it again. */
+  @Post('vacancies/:id/reread')
+  @HttpCode(200)
+  @RequirePerm(P.SCREENING_RUN)
+  async reread(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
+    await assertVacancyAccess(this.ds, me, id);
+    return this.svc.rereadCvs({ vacancyId: id }, me);
+  }
+
+  @Post('applications/:id/reread')
+  @HttpCode(200)
+  @RequirePerm(P.SCREENING_RUN)
+  async rereadOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
+    await assertApplicationAccess(this.ds, me, id);
+    return this.svc.rereadCvs({ applicationId: id }, me);
+  }
+
   @Post('vacancies/:id/shortlist')
   @HttpCode(200)
   @RequirePerm(P.SHORTLIST)

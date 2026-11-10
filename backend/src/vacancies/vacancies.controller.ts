@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Res, UploadedFile, UseInterceptors,
+  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Res, UploadedFile, UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
@@ -84,6 +84,13 @@ export class VacanciesController {
   @RequirePerm(P.JOBPOST_EDIT)
   updateJobPost(@Param('id', ParseUUIDPipe) id: string, @Body() dto: JobPostDto, @CurrentUser() me: AuthUser) {
     return this.svc.updateJobPost(id, dto, me);
+  }
+
+  /** HR coordinator of the vacancy, HR Manager, Super Admin (owner, 2026-11-08): `jobpost.edit` + coordinator scope in the service. */
+  @Delete('job-posts/:id')
+  @RequirePerm(P.JOBPOST_EDIT)
+  deleteJobPost(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
+    return this.svc.deleteJobPost(id, me);
   }
 
   @Post('job-posts/:id/status')

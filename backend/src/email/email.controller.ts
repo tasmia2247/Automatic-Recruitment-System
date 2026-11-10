@@ -3,7 +3,7 @@ import {
 } from '@nestjs/common';
 import { AuthUser, CurrentUser, RequirePerm } from '../common/auth';
 import { P } from '../common/permissions';
-import { ComposeDto, HistoryQuery, SendDto, TemplateDto } from './email.dto';
+import { ComposeDto, SendDto, TemplateDto } from './email.dto';
 import { EmailService, PLACEHOLDERS } from './email.service';
 
 @Controller('email')
@@ -53,18 +53,5 @@ export class EmailController {
   async send(@Body() dto: SendDto, @CurrentUser() me: AuthUser) {
     await this.svc.assertRecipients(dto.applicationIds, me);
     return this.svc.send(dto, me);
-  }
-
-  @Post('events/:id/retry')
-  @HttpCode(200)
-  @RequirePerm(P.EMAIL_SEND)
-  retry(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
-    return this.svc.retry(id, me);
-  }
-
-  @Get('history')
-  @RequirePerm(P.EMAIL_SEND)
-  history(@Query() q: HistoryQuery, @CurrentUser() me: AuthUser) {
-    return this.svc.history(q, me);
   }
 }

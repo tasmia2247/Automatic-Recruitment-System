@@ -1,4 +1,5 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import type { Request, Response } from 'express';
 import { Repository } from 'typeorm';
@@ -33,7 +34,7 @@ function clientAddress(req: Request) {
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService, @InjectRepository(User) private readonly users: Repository<User>) {}
+  constructor(private readonly auth: AuthService, @InjectRepository(User) private readonly users: Repository<User>, private readonly jwt: JwtService) {}
 
   @Public()
   @Post('login')
@@ -47,7 +48,12 @@ export class AuthController {
   @Public()
   @Post('logout')
   @HttpCode(200)
-  logout(@Res({ passthrough: true }) res: Response) {
+  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    // Signing out ends the session for real (security test, 2026-11-09): every token of this user issued until now is refused,
+    // on every device. A missing or invalid token just clears the cookie.
+    const token = req.cookies?.[AUTH_COOKIE];
+    const sub = token ? await this.jwt.verifyAsync<{ sub: string }>(token).then((p) => p.sub).catch(() => null) : null;
+    if (sub) await this.users.update(sub, { sessionsValidFrom: new Date() });
     res.clearCookie(AUTH_COOKIE, { path: '/' });
     return { ok: true };
   }
