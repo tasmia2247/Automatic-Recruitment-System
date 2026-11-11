@@ -241,9 +241,10 @@ export class CandidateDocument extends BaseEntity {
   @Index() @Column('uuid') applicationId: string;
   @ManyToOne(() => Application, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'applicationId' }) application: Application;
   @Column('uuid') candidateId: string;
-  /** The stored file; null once it has been read and removed (owner, 2026-11-08: CV files are not kept). */
+  /** The stored CV file (owner, 2026-11-10: the original is kept so HR can download it, singly or in a PDF pack). Null only for older
+   * records whose file was removed under the previous policy, or for CVs whose data was entered by hand without a file. */
   @Column({ type: 'varchar', length: 300, nullable: true }) storageKey: string | null;
-  /** The CV's text as read (reading order), kept instead of the file; screening and "Re-read CVs" use it. */
+  /** The CV's text as read (reading order), kept alongside the file; used for screening and "Re-read CVs". */
   @Column({ type: 'text', nullable: true }) textContent: string | null;
   /** The biggest text at the top of the PDF's first page, kept with the text for re-reading. */
   @Column({ type: 'varchar', length: 200, nullable: true }) nameHint: string | null;

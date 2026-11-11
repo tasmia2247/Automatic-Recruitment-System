@@ -1,6 +1,11 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import * as ExcelJS from 'exceljs';
+// archiver's CJS export is callable; the @types package only exposes named members, so require it dynamically.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const archiver: (format: 'zip', options?: { zlib?: { level?: number } }) => import('archiver').Archiver = require('archiver');
+import * as path from 'path';
+import { PassThrough } from 'stream';
 import { createHash } from 'crypto';
 import { Brackets, DataSource, EntityManager, In } from 'typeorm';
 import { AuthUser } from '../common/auth';
@@ -174,20 +179,14 @@ export class CandidatesService implements OnModuleInit {
       if (Object.keys(cpatch).length) await m.update(Candidate, cand.id, cpatch);
       await this.detectDuplicate(m, applicationId, cand.id, doc.sha256, { ...cand, ...cpatch });
       await this.jobs.enqueue(m, 'SCREENING', applicationId, app.applicationNo, runById ? { runById } : undefined);
-      // CV files are not kept (owner, 2026-11-08): the text replaces the file once it has been read.
-      if (fromFile) await m.update(CandidateDocument, doc.id, { textContent: text, nameHint, storageKey: null, fileRemovedAt: new Date() });
+      // Keep the original CV file (owner, 2026-11-10): both the file and its extracted text are stored;
+      // the file is downloadable from CV Bank, Interview, Joining and Joined pages, singly or as a bulk PDF pack.
+      if (fromFile) await m.update(CandidateDocument, doc.id, { textContent: text, nameHint });
     });
-    if (fromFile && doc.storageKey) this.storage.remove(doc.storageKey);
     return partial ? { status: 'Partial' as const, note: `Missing: ${missing.join(', ')}` } : undefined;
   }
 
-  /** Deletes the kept file of a CV that could not be read, once HR has entered its data by hand; name, size and hash stay. */
-  private async removeUnreadFile(applicationId: string) {
-    const doc = await this.ds.getRepository(CandidateDocument).findOne({ where: { applicationId }, order: { createdAt: 'DESC' } });
-    if (!doc?.storageKey) return;
-    await this.ds.getRepository(CandidateDocument).update(doc.id, { storageKey: null, fileRemovedAt: new Date() });
-    this.storage.remove(doc.storageKey);
-  }
+  // Original CV files are kept (owner, 2026-11-10); nothing removes them after extraction or correction.
 
   /** Flags possible duplicates for human review; never merges automatically (SRS 9.4). */
   private async detectDuplicate(m: EntityManager, applicationId: string, candidateId: string, sha256: string, c: Partial<Candidate>) {
@@ -331,7 +330,7 @@ export class CandidatesService implements OnModuleInit {
   async document(documentId: string) {
     const doc = await this.ds.getRepository(CandidateDocument).findOne({ where: { id: documentId } });
     if (!doc) throw new NotFoundException();
-    if (!doc.storageKey) throw new NotFoundException('The original CV file is not kept; ARS keeps the text read from it (see the application).');
+    if (!doc.storageKey) throw new NotFoundException('The original CV file is not kept for this application (older record). Only the extracted text is available.');
     return { doc, buffer: this.storage.read(doc.storageKey) };
   }
 
@@ -371,8 +370,8 @@ export class CandidatesService implements OnModuleInit {
       enteredForUnread = app.extractionStatus === 'Failed';
       return m.findOne(Application, { where: { id: applicationId }, relations: { candidate: true } });
     });
-    // A CV that could not be read kept its file for HR; once HR has entered its data, the file goes too (owner, 2026-11-08).
-    if (enteredForUnread) await this.removeUnreadFile(applicationId);
+    // The original CV file is kept regardless (owner, 2026-11-10); the `enteredForUnread` check is no longer used.
+    void enteredForUnread;
     return res;
   }
 
@@ -586,5 +585,87 @@ export class CandidatesService implements OnModuleInit {
 
   async pendingJobsFor(applicationId: string) {
     return this.ds.getRepository(ProcessingJob).find({ where: { refId: applicationId }, order: { createdAt: 'DESC' } });
+  }
+
+  /**
+   * Bulk CV download (owner, 2026-11-10): a ZIP of the original CV files of the given applications, each renamed to the
+   * candidate's name (keeping the file's original extension so the format — PDF, DOC, DOCX, TXT — is preserved). Candidates
+   * with the same name are disambiguated with their application number; a candidate without a name falls back to the stored
+   * file's name. Applications whose file was removed under the previous policy (storageKey = null) are listed in a
+   * `_not_available.txt` entry inside the ZIP, with the reason, so HR can see why a row was skipped. One `report.cv_pack`
+   * audit row records the counts.
+   */
+  async cvPack(applicationIds: string[], me: AuthUser) {
+    if (!applicationIds.length) throw new BadRequestException('Select at least one candidate.');
+    const apps = await this.ds.getRepository(Application).find({
+      where: { id: In(applicationIds) },
+      relations: { candidate: true, vacancy: true },
+    });
+    const byId = new Map(apps.map((a) => [a.id, a]));
+    const missing = applicationIds.filter((id) => !byId.has(id));
+    if (missing.length) throw new NotFoundException(`${missing.length} application${missing.length === 1 ? '' : 's'} not found.`);
+    const docs = await this.ds.getRepository(CandidateDocument).find({
+      where: { applicationId: In(applicationIds) },
+      order: { createdAt: 'DESC' },
+    });
+    // One (most recent) document per application.
+    const docByApp = new Map<string, CandidateDocument>();
+    for (const d of docs) if (!docByApp.has(d.applicationId)) docByApp.set(d.applicationId, d);
+
+    const ordered = [...apps].sort((a, b) => (a.candidate.name ?? a.applicationNo).localeCompare(b.candidate.name ?? b.applicationNo));
+    const unavailable: { name: string; applicationNo: string; reason: string }[] = [];
+
+    // Collect entries first so we can produce a clear 404 when nothing is downloadable.
+    const entries: { name: string; buffer: Buffer }[] = [];
+    const used = new Set<string>();
+    for (const app of ordered) {
+      const doc = docByApp.get(app.id);
+      const label = app.candidate.name ?? app.candidate.candidateNo;
+      if (!doc) { unavailable.push({ name: label, applicationNo: app.applicationNo, reason: 'No CV document' }); continue; }
+      if (!doc.storageKey) { unavailable.push({ name: label, applicationNo: app.applicationNo, reason: 'CV file not kept (older record)' }); continue; }
+      let buffer: Buffer;
+      try { buffer = this.storage.read(doc.storageKey); }
+      catch { unavailable.push({ name: label, applicationNo: app.applicationNo, reason: 'CV file missing on disk' }); continue; }
+      entries.push({ name: this.cvFileName(app.candidate.name, doc.originalName, app.applicationNo, used), buffer });
+    }
+    if (!entries.length) throw new NotFoundException('None of the selected applications has a downloadable CV file.');
+
+    const zip = archiver('zip', { zlib: { level: 6 } });
+    const out = new PassThrough();
+    const chunks: Buffer[] = [];
+    out.on('data', (c: Buffer) => chunks.push(c));
+    const done = new Promise<void>((resolve, reject) => { out.on('end', () => resolve()); zip.on('error', reject); });
+    zip.pipe(out);
+    for (const e of entries) zip.append(e.buffer, { name: e.name });
+    if (unavailable.length) {
+      const text = unavailable.map((u) => `${u.name} (${u.applicationNo}) — ${u.reason}`).join('\r\n');
+      zip.append(Buffer.from(text, 'utf8'), { name: '_not_available.txt' });
+    }
+    await zip.finalize();
+    await done;
+
+    await this.audit.log(this.ds.manager, me, 'report.cv_pack', 'Application', ordered[0].id, {
+      label: `${ordered.length} CV${ordered.length === 1 ? '' : 's'}`,
+      new: { applications: ordered.length, included: entries.length, unavailable: unavailable.length },
+    });
+    return { fileName: `CVs_${new Date().toISOString().slice(0, 10)}.zip`, buffer: Buffer.concat(chunks) };
+  }
+
+  /**
+   * Build the ZIP entry name: candidate name with the CV file's extension, falling back to the stored file's name when the
+   * candidate has none. Unsafe filename characters are stripped (Windows and web); duplicates are suffixed with the
+   * application number so two "Md. Rahim" CVs do not overwrite each other.
+   */
+  private cvFileName(candidateName: string | null, originalName: string, applicationNo: string, used: Set<string>) {
+    const ext = path.extname(originalName) || '.pdf';
+    const base = (candidateName?.trim() || path.basename(originalName, path.extname(originalName)))
+      .replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim() || applicationNo;
+    let name = `${base}${ext}`;
+    if (used.has(name.toLowerCase())) name = `${base} (${applicationNo})${ext}`;
+    // Final guard against collisions: two identical names with the same applicationNo should not happen, but still number them.
+    let n = 2;
+    while (used.has(name.toLowerCase())) { name = `${base} (${applicationNo}) (${n++})${ext}`; }
+    used.add(name.toLowerCase());
+    return name;
   }
 }

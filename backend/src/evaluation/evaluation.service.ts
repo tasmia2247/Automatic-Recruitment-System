@@ -66,23 +66,32 @@ export class EvaluationService {
     if (q.q) qb.andWhere('(c.name ILIKE :q OR c.candidateNo ILIKE :q OR a.applicationNo ILIKE :q)', { q: `%${q.q}%` });
     const apps = await qb.orderBy('d.name', 'ASC').addOrderBy('v.positionTitle', 'ASC').addOrderBy('c.name', 'ASC', 'NULLS LAST').getMany();
     const ids = apps.map((a) => a.id);
-    const [stages, marks, joins] = ids.length ? await Promise.all([
+    const [stages, marks, joins, docs] = ids.length ? await Promise.all([
       this.ds.getRepository(CandidateStage).find({ where: { applicationId: In(ids) } }),
       this.ds.getRepository(EvaluationMark).find({ where: { applicationId: In(ids) }, relations: { evaluator: true } }),
       this.ds.getRepository(JoiningRecord).find({ where: { applicationId: In(ids) } }),
-    ]) : [[], [], []];
+      // Newest CV document per application, for the inline download and bulk CV pack.
+      this.ds.query(
+        `SELECT DISTINCT ON ("applicationId") "applicationId", id, "originalName", ("storageKey" IS NOT NULL) AS "hasFile"
+           FROM candidate_documents WHERE "applicationId" = ANY($1::uuid[])
+          ORDER BY "applicationId", "createdAt" DESC`, [ids]) as Promise<{ applicationId: string; id: string; originalName: string; hasFile: boolean }[]>,
+    ]) : [[], [], [], []];
     return {
       allVacancies: !scope,
-      rows: apps.map((a) => ({
-        applicationId: a.id, applicationNo: a.applicationNo, candidateNo: a.candidate.candidateNo, name: a.candidate.name,
-        email: a.candidate.email, phone: a.candidate.phone, screeningResult: a.screeningResult, shortlisted: a.shortlisted,
-        finalDecision: a.finalDecision, finalDecisionRemarks: a.finalDecisionRemarks, expectedSalary: a.expectedSalary,
-        vacancy: { id: a.vacancy.id, vacancyNo: a.vacancy.vacancyNo, positionTitle: a.vacancy.positionTitle, status: a.vacancy.status,
-          departmentId: a.vacancy.departmentId, department: a.vacancy.department.name, company: a.vacancy.company.code },
-        stages: Object.fromEntries(stages.filter((s) => s.applicationId === a.id).map((s) => [s.stageType, s])),
-        marks: marks.filter((mk) => mk.applicationId === a.id).map((mk) => ({ ...mk, evaluator: { name: mk.evaluator.name } })),
-        joining: joins.find((j) => j.applicationId === a.id) ?? null,
-      })),
+      rows: apps.map((a) => {
+        const d = (docs as any[]).find((x) => x.applicationId === a.id);
+        return {
+          applicationId: a.id, applicationNo: a.applicationNo, candidateNo: a.candidate.candidateNo, name: a.candidate.name,
+          email: a.candidate.email, phone: a.candidate.phone, screeningResult: a.screeningResult, shortlisted: a.shortlisted,
+          finalDecision: a.finalDecision, finalDecisionRemarks: a.finalDecisionRemarks, expectedSalary: a.expectedSalary,
+          vacancy: { id: a.vacancy.id, vacancyNo: a.vacancy.vacancyNo, positionTitle: a.vacancy.positionTitle, status: a.vacancy.status,
+            departmentId: a.vacancy.departmentId, department: a.vacancy.department.name, company: a.vacancy.company.code },
+          stages: Object.fromEntries(stages.filter((s) => s.applicationId === a.id).map((s) => [s.stageType, s])),
+          marks: marks.filter((mk) => mk.applicationId === a.id).map((mk) => ({ ...mk, evaluator: { name: mk.evaluator.name } })),
+          joining: joins.find((j) => j.applicationId === a.id) ?? null,
+          documentId: d?.id ?? null, documentName: d?.originalName ?? null, hasFile: !!d?.hasFile,
+        };
+      }),
     };
   }
 

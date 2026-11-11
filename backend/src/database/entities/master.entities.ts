@@ -25,6 +25,14 @@ export class Department extends BaseEntity {
 
   @Column({ default: true })
   active: boolean;
+
+  /**
+   * Department-level total manpower quota (owner, 2026-11-10). Edited only on Master Data → Departments; the
+   * requisition form reads it from here as "Current quota (Dept.)". The department's current manpower is derived
+   * as the sum of its designation rows' `presentManpower` on `manpower_quotas`, so no caching here.
+   */
+  @Column({ type: 'int', nullable: true })
+  totalQuota: number | null;
 }
 
 @Entity('positions')
@@ -41,19 +49,15 @@ export class Position extends BaseEntity {
 }
 
 /**
- * Approved quota and present manpower. `positionId = null` is the department-level total.
+ * Approved quota and present manpower for a (department, position). The company dimension was dropped on
+ * 2026-11-10 (owner) — a department's designation quota is a master figure that does not depend on which
+ * attached company a requisition names (see migration `1793300000023`). Department-level totals live on
+ * `departments.totalQuota` (migration `1793300000022`).
  * Values may be null => UI shows "Not available" instead of a misleading number (SRS 5.2).
  */
 @Entity('manpower_quotas')
-@Index(['companyId', 'departmentId', 'positionId'], { unique: true })
+@Index(['departmentId', 'positionId'], { unique: true })
 export class ManpowerQuota extends BaseEntity {
-  @Column('uuid')
-  companyId: string;
-
-  @ManyToOne(() => Company)
-  @JoinColumn({ name: 'companyId' })
-  company: Company;
-
   @Column('uuid')
   departmentId: string;
 
@@ -61,12 +65,12 @@ export class ManpowerQuota extends BaseEntity {
   @JoinColumn({ name: 'departmentId' })
   department: Department;
 
-  @Column({ type: 'uuid', nullable: true })
-  positionId: string | null;
+  @Column('uuid')
+  positionId: string;
 
-  @ManyToOne(() => Position, { nullable: true })
+  @ManyToOne(() => Position)
   @JoinColumn({ name: 'positionId' })
-  position: Position | null;
+  position: Position;
 
   @Column({ type: 'int', nullable: true })
   approvedQuota: number | null;

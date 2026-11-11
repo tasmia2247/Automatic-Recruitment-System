@@ -142,7 +142,7 @@ describe('Requisition and approval gate', () => {
     expect((await quotaDepts('recruiter')).size).toBeGreaterThan(1); // HR: every department (view)
     expect((await quotaDepts('admin')).size).toBeGreaterThan(1);
     await (await as('approval.admin')).get('/api/master/quotas').expect(403); // Admin: no positions & quota
-    await (await as('recruiter')).post('/api/master/quotas').send({ companyId: ids.ho, departmentId: ids.ict, approvedQuota: 1 }).expect(403);
+    await (await as('recruiter')).post('/api/master/quotas').send({ departmentId: ids.ict, positionId: ids.dev, approvedQuota: 1 }).expect(403);
     // A user with no department gets a clear refusal on scoped lists, but the dashboard still loads.
     await (await as('viewer')).get('/api/requisitions').expect(403);
     await (await as('viewer')).get('/api/dashboard').expect(200);
@@ -150,9 +150,9 @@ describe('Requisition and approval gate', () => {
 
   it('quota rows are deleted only by their own department or the Super Admin (owner, 2026-11-08)', async () => {
     const ict = await as('requester.ict');
-    const used = new Set((await ict.get('/api/master/quotas').expect(200)).body.filter((q: any) => q.companyId === ids.ho).map((q: any) => q.positionId));
+    const used = new Set((await ict.get('/api/master/quotas').expect(200)).body.map((q: any) => q.positionId));
     const free = (await ict.get('/api/master/lookups').expect(200)).body.positions.filter((p: any) => !used.has(p.id)).map((p: any) => p.id);
-    const row = async (positionId: string) => (await ict.post('/api/master/quotas').send({ companyId: ids.ho, departmentId: ids.ict, positionId, approvedQuota: 3, presentManpower: 1 }).expect(201)).body.id;
+    const row = async (positionId: string) => (await ict.post('/api/master/quotas').send({ departmentId: ids.ict, positionId, approvedQuota: 3, presentManpower: 1 }).expect(201)).body.id;
     const a = await row(free[0]);
     const b = await row(free[1]);
     await (await as('requester.admin')).delete(`/api/master/quotas/${a}`).expect(403); // another department
@@ -302,8 +302,9 @@ describe('Vacancy, job post, CV intake and screening', () => {
     const files = (await ds.query(`SELECT "storageKey" FROM candidate_documents WHERE "applicationId" = ANY($1)`, [[ids.appA, ids.appB, ids.appC]])).map((r: any) => path.resolve(config.storageDir, r.storageKey));
     expect(files.every((f: string) => fs.existsSync(f))).toBe(true);
     await jobs.drain();
-    expect(files.some((f: string) => fs.existsSync(f))).toBe(false); // read: the files are deleted, their text kept
-    // Read, so its file is gone (only the text is kept), and the same file is still refused.
+    // Owner, 2026-11-10: the original CV file is kept alongside the extracted text, so HR can download it or bundle a PDF pack.
+    expect(files.every((f: string) => fs.existsSync(f))).toBe(true);
+    // The same file is still refused (dedup by sha256).
     const later = await hr.post(`/api/vacancies/${ids.vacancy}/cvs`).attach('files', Buffer.from(CV_A), 'rahim-again.txt').expect(201);
     expect(later.body[0]).toMatchObject({ ok: false, error: expect.stringMatching(/already received/) });
   });
@@ -607,46 +608,41 @@ describe('Selection, evaluation, communication and joining', () => {
     expect((await ds.query(`SELECT count(*)::int AS n FROM joining_records WHERE status = 'Approved'`))[0].n).toBe(1);
   });
 
-  it('joining updates the dept-total and designation quota rows automatically (owner, 2026-11-09)', async () => {
+  it('joining updates the matching designation quota row and derives the dept figure (owner, 2026-11-10)', async () => {
     const ict = await as('requester.ict');
-    // Make sure both a dept-total row and the Software Developer designation row exist with a known baseline.
+    // Department total lives on Master Data → Departments; designation row on /master/quotas.
+    const admin = await as('admin');
+    await admin.patch(`/api/master/departments/${ids.ict}`).send({ totalQuota: 50 }).expect(200);
     const present = (await ict.get('/api/master/quotas').expect(200)).body as any[];
-    const upsert = async (positionId: string | null, approvedQuota: number, presentManpower: number) => {
-      const row = present.find((q) => q.companyId === ids.ho && q.departmentId === ids.ict && q.positionId === positionId);
+    const upsertDesig = async (positionId: string, approvedQuota: number, presentManpower: number) => {
+      const row = present.find((q) => q.departmentId === ids.ict && q.positionId === positionId);
       if (row) {
-        // Super Admin to bypass the quota-chart guard when a row already exists.
-        await (await as('admin')).patch(`/api/master/quotas/${row.id}`).send({ approvedQuota, presentManpower }).expect(200);
+        await admin.patch(`/api/master/quotas/${row.id}`).send({ approvedQuota, presentManpower }).expect(200);
         return row.id as string;
       }
-      return (await ict.post('/api/master/quotas').send({ companyId: ids.ho, departmentId: ids.ict, positionId, approvedQuota, presentManpower }).expect(201)).body.id as string;
+      return (await ict.post('/api/master/quotas').send({ departmentId: ids.ict, positionId, approvedQuota, presentManpower }).expect(201)).body.id as string;
     };
-    const deptId = await upsert(null, 50, 40);
-    const desigId = await upsert(ids.dev, 10, 7);
-    // One joining already happened in AC-23; count it in by taking the current present manpower as the new baseline.
+    const desigId = await upsertDesig(ids.dev, 10, 7);
     const row = async (id: string) => (await ict.get(`/api/master/quotas`).expect(200)).body.find((q: any) => q.id === id);
-    const before = { dept: (await row(deptId)).presentManpower, desig: (await row(desigId)).presentManpower };
-    expect(before).toEqual({ dept: 40, desig: 7 });
-    // Second joining of the same vacancy (headcount = 2 in AC-23) lifts both rows by exactly one.
+    const deptFig = async () => (await ict.get(`/api/master/dept-figures?departmentId=${ids.ict}`).expect(200)).body;
+    const beforeDesig = (await row(desigId)).presentManpower;
+    const beforeDept = (await deptFig()).presentManpower;
+    expect(beforeDesig).toBe(7);
+    // Second joining of the same vacancy (headcount = 2 in AC-23) lifts the designation row by exactly one.
     const hr = await as('recruiter');
-    // Find the other final-selected candidate on the same vacancy and approve its joining.
     const other = (await hr.get('/api/joining/pending').expect(200)).body[0];
     if (other) {
       await hr.put(`/api/joining/${other.id}`).send({ joiningDate: '2026-12-02' }).expect(200);
       await hr.post(`/api/joining/${other.id}/approve`).send({ joiningDate: '2026-12-02' }).expect(200);
-      expect((await row(deptId)).presentManpower).toBe(before.dept + 1);
-      expect((await row(desigId)).presentManpower).toBe(before.desig + 1);
+      expect((await row(desigId)).presentManpower).toBe(beforeDesig + 1);
+      // Dept present manpower is derived — it must have moved by the same delta.
+      expect((await deptFig()).presentManpower).toBe(beforeDept + 1);
     }
-    // Dept-total rows come before designation rows (owner, 2026-11-09): admin sees totals at the top.
+    // The quota list holds only designation rows now; no positionId=null row.
     const list = (await ict.get(`/api/master/quotas?departmentId=${ids.ict}`).expect(200)).body as any[];
-    const totals = list.filter((r) => !r.positionId);
-    const designations = list.filter((r) => r.positionId);
-    if (totals.length && designations.length) {
-      const lastTotalIdx = list.lastIndexOf(totals[totals.length - 1]);
-      const firstDesigIdx = list.indexOf(designations[0]);
-      expect(lastTotalIdx).toBeLessThan(firstDesigIdx);
-    }
+    expect(list.every((r) => r.positionId)).toBe(true);
     // Audit records the auto-update with the change and the reason.
-    const audit = (await (await as('admin')).get(`/api/audit?entityType=ManpowerQuota&entityId=${deptId}&pageSize=10`).expect(200)).body.items;
+    const audit = (await admin.get(`/api/audit?entityType=ManpowerQuota&entityId=${desigId}&pageSize=10`).expect(200)).body.items;
     const auto = audit.find((e: any) => e.action === 'quota.auto_update');
     if (auto) expect(auto.newValues).toMatchObject({ reason: 'joining.approved' });
   });
@@ -840,19 +836,32 @@ describe('Candidate CV Bank (department -> vacancy -> candidates) and applicatio
     expect(audit).toEqual(expect.arrayContaining(['joining.reject', 'joining.reopen']));
   });
 
-  it('a CV file is not kept once read: its text is (owner, 2026-11-08); an unreadable one stays until HR enters the data', async () => {
+  it('the original CV file is kept alongside its extracted text (owner, 2026-11-10), downloadable singly and as a PDF pack', async () => {
     const hr = await as('recruiter');
     const doc = (await hr.get(`/api/applications/${ids.appA}`)).body.documents[0];
-    expect(doc).toMatchObject({ storageKey: null, originalName: 'rahim.txt', textContent: expect.stringContaining('Rahim Uddin'), fileRemovedAt: expect.any(String) });
+    expect(doc).toMatchObject({ originalName: 'rahim.txt', textContent: expect.stringContaining('Rahim Uddin') });
+    expect(doc.storageKey).toEqual(expect.stringMatching(/^cvs\//)); // still stored, not nulled out
+    expect(doc.fileRemovedAt).toBeNull();
     expect(doc.sha256).toHaveLength(64); // still refuses the same file twice and finds duplicates
-    expect((await hr.get(`/api/documents/${doc.id}`).expect(404)).body.message).toMatch(/not kept/);
-    // The broken PDF could not be read: HR can still open it, until the data is entered by hand.
+    expect((await hr.get(`/api/documents/${doc.id}`).expect(200)).headers['content-disposition']).toMatch(/^inline/);
+    expect((await hr.get(`/api/documents/${doc.id}?download=1`).expect(200)).headers['content-disposition']).toMatch(/^attachment/);
+    // The broken PDF could not be read: its file is kept too, and stays after HR enters the data by hand.
     const broken = (await hr.get(`/api/applications/${ids.broken}`)).body.documents[0];
     expect((await hr.get(`/api/documents/${broken.id}`).expect(200)).headers['content-disposition']).toMatch(/^inline/);
-    expect((await hr.get(`/api/documents/${broken.id}?download=1`).expect(200)).headers['content-disposition']).toMatch(/^attachment/);
     await hr.patch(`/api/applications/${ids.broken}`).send({ name: 'Broken File Person', degree: 'BSc' }).expect(200);
-    await hr.get(`/api/documents/${broken.id}`).expect(404);
-    expect((await hr.get(`/api/applications/${ids.broken}`)).body.documents[0]).toMatchObject({ storageKey: null, textContent: null, originalName: 'broken.pdf' });
+    const after = (await hr.get(`/api/applications/${ids.broken}`)).body.documents[0];
+    expect(after.storageKey).toEqual(expect.stringMatching(/^cvs\//));
+    expect((await hr.get(`/api/documents/${broken.id}`).expect(200)).headers['content-type']).toMatch(/pdf/);
+
+    // Bulk CV pack: a ZIP of the originals, each named after the candidate (owner, 2026-11-10).
+    const pack = await hr.post('/api/applications/cv-pack').send({ applicationIds: [ids.appA, ids.broken] }).buffer(true).parse((res, cb) => {
+      const parts: Buffer[] = [];
+      res.on('data', (c: Buffer) => parts.push(c));
+      res.on('end', () => cb(null, Buffer.concat(parts)));
+    }).expect(200);
+    expect(pack.headers['content-type']).toMatch(/zip/);
+    // ZIP signature at the start of the response body.
+    expect(Buffer.from(pack.body).subarray(0, 2).toString('latin1')).toBe('PK');
   });
 });
 
@@ -953,7 +962,8 @@ describe('HR coordinator assignment and coordinator-specific access', () => {
     expect(apps.length).toBeGreaterThan(0);
     const appId = apps[0].id;
     const cv = (await own.get(`/api/cv-bank/applications?vacancyId=${ids.vacancy}`).expect(200)).body.items.find((r: any) => r.documentId);
-    await own.get(`/api/documents/${cv.documentId}`).expect(404); // allowed, but the file is no longer kept
+    // The assigned coordinator may download the stored CV (owner, 2026-11-10: CV files are kept).
+    expect((await own.get(`/api/documents/${cv.documentId}`).expect(200)).headers['content-disposition']).toMatch(/^inline/);
 
     // Unassigned HR user: nothing listed, every direct request refused.
     expect((await other.get('/api/vacancies').expect(200)).body.items).toEqual([]);
@@ -1076,7 +1086,7 @@ describe('Users & Roles: per-user permissions, access scopes and templates', () 
     await dept.get(`/api/requisitions/${ictReq}`).expect(200);
     const quotaDepts = new Set((await dept.get(`/api/master/quotas?departmentId=${ids.admin}`).expect(200)).body.map((q: any) => q.departmentId));
     expect([...quotaDepts]).toEqual([ids.ict]); // the custom list replaces the own department; a filter cannot widen it
-    await dept.post('/api/master/quotas').send({ companyId: ids.ho, departmentId: ids.admin, approvedQuota: 1 }).expect(403);
+    await dept.post('/api/master/quotas').send({ departmentId: ids.admin, positionId: ids.dev, approvedQuota: 1 }).expect(403);
     expect((await dept.get('/api/dashboard').expect(200)).body.department.name).toBeNull(); // dashboard: all departments
     const me = (await dept.get('/api/auth/me').expect(200)).body;
     expect(me.scopes).toMatchObject({ dashboard: null, quotas: [ids.ict] });

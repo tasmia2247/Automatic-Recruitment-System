@@ -557,13 +557,17 @@ and the logo. Drafts are **not** marked on the PDF or text (the page shows the s
      Before this, a wrong name such as "Dhaka." stayed for ever, because extraction only filled empty candidate fields.
    - Fixed 2026-11-08: a correction of one field also marked every other optional field as corrected (the DTO carries them as undefined); only fields sent count now.
    CVs already in the database keep the values from the old extractor until they are read again with "Re-read CVs".
-   - **CV files are not kept** (owner, 2026-11-08): once a CV has been read, its text (reading order, as the extractor saw it) and the PDF's name hint go into
-     `candidate_documents.textContent` / `nameHint`, the file is deleted and `storageKey` becomes null (`fileRemovedAt` set). The row keeps the file's name, type,
-     size and SHA-256, so the same file is still refused twice and duplicates are still found. Screening and "Re-read CVs" use the kept text (so a later change to the
-     PDF layout reader does not reach CVs already read). A CV that could not be read keeps its file, so HR can open it and type the data; saving a correction on it
-     deletes the file. `GET documents/:id` answers 404 "not kept" for a removed file. The application page shows "CV text" instead of the PDF; the CV Bank shows
-     "CV text" (a link to the application) instead of Preview / Download. A mail's copy of an attachment is deleted once its application is made. On the `ars`
-     database all 51 stored CVs were read again this way on 2026-11-08 and every CV file was deleted (owner's confirmation), including 3 files no record used.
+   - **CV files are kept** (owner, 2026-11-10 — reverses the 2026-11-08 policy): once a CV has been read, its text and name hint are stored in
+     `candidate_documents.textContent` / `nameHint` **alongside** the original file (`storageKey` stays set, `fileRemovedAt` stays null). HR downloads single CVs through
+     `GET /api/documents/:id` (inline preview; `?download=1` as attachment) and bulk-downloads several as a ZIP of the originals through
+     `POST /api/applications/cv-pack` (`CvPackDto`). Each entry in the ZIP is the original file bytes, renamed `<Candidate Name><ext>` (the CV file's extension — `.pdf`,
+     `.doc`, `.docx`, `.txt` — is preserved; the archive is built with the `archiver` npm module, pinned to v7 for CommonJS compatibility with Jest). A candidate
+     without a name falls back to the stored file's basename; a name collision gets `(APP-…)` appended. Applications whose file was removed under the previous policy or
+     is missing on disk are listed in a `_not_available.txt` entry inside the ZIP with the reason. CV pack is reachable from CV Bank, Interview (Selected bar),
+     Joining Pending (bulk-select) and Joined candidate list (new bulk-select). Each page's rows carry `documentId` / `documentName` / `hasFile`. `report.cv_pack`
+     is audited with `{ applications, included, unavailable }`.
+   - Older note: on the `ars` database all 51 stored CVs were read again on 2026-11-08 and every CV file deleted under the previous policy; those records have
+     `storageKey = null` and cannot be included in a CV pack until re-uploaded.
    - Education subjects also match common abbreviations both ways (`SUBJECT_ALIASES` in `screening.engine.ts`: HRM, CSE, EEE, ECE, AIS, MIS, IPE, FDT, ICT, CE, ME;
      "and" / "&" ignored), and "PGDHRM" gives the subject HRM.
    - **Full screening test with the sample CVs** (2026-11-08, scratchpad `screening-full.js` on `ars_test`): three requisitions (HR, Fashion Designing,
@@ -872,7 +876,8 @@ From the SRS and acceptance tests. Each is enforced server-side today.
 | --- | --- | --- |
 | `companies`, `departments` | code, name, active | code unique |
 | `positions` | title, code, active | title unique; not tied to a department or company |
-| `manpower_quotas` | companyId, departmentId, positionId, approvedQuota, presentManpower, effectiveDate, remarks, updatedById | (company, department, position) unique; null position = department total |
+| `departments` | code, name, active, **totalQuota** (owner, 2026-11-10) | Department-level total manpower quota lives here, edited from Master Data → Departments |
+| `manpower_quotas` | companyId, departmentId, positionId, approvedQuota, presentManpower, effectiveDate, remarks, updatedById | (company, department, position) unique; `positionId` is NOT NULL since migration `1793300000022` (dept totals moved to `departments.totalQuota`) |
 
 ### Requisitions (`requisition.entities.ts`)
 
@@ -964,7 +969,7 @@ Never edit an applied migration; add a new one. `synchronize` is off.
 | --- | --- | --- |
 | `/login` | Sign in | none |
 | `/` | Dashboard (Department, HR, Admin sections) | none |
-| `/quotas` | Positions & Quota; Add quota row, Edit and Delete (with confirmation) for `quota.edit`. Dept-total rows are listed above designation rows per department (owner, 2026-11-09). Approving a joining raises `presentManpower` by one on the dept-total row and (if present) the matching designation row; reverting a joining drops them back — audited as `quota.auto_update` | `quota.view` |
+| `/quotas` | Positions & Quota; Add quota row (position required), Edit and Delete (with confirmation) for `quota.edit`. Dept totals are shown as a read-only header per department, sourced from `departments.totalQuota` plus the live sum of designation `presentManpower`; dept totals are edited only on Master Data → Departments (owner, 2026-11-10). Approving a joining raises the matching designation row's `presentManpower` by one; reverting drops it — audited as `quota.auto_update`. The dept-wide present manpower updates automatically because it is derived | `quota.view` |
 | `/requisitions`, `/requisitions/new`, `/requisitions/[id]`, `/requisitions/[id]/edit`, `/requisitions/[id]/print` | List (Delete for the Super Admin), form, detail (read-only for approvers: no Approve / Return / Reject, only a link to the inbox; the "HR recruitment" card with the vacancy link / Create vacancy was removed on 2026-11-08 and `GET requisitions/:id` no longer returns `vacancy`; vacancies are made from the HR Approved Queue and opened from Vacancies), Print/PDF | `requisition.view` |
 | `/approvals` | Approver Inbox. Since 2026-11-08 (owner) Approve and Reject buttons on each row of "All pending approvals" and "Waiting for your decision" open the same dialog as the requisition page (remarks or reason, optional supporting document; the step's `actionId` is sent). Return for clarification stays on the requisition. "My recent decisions" has a Newest first / Oldest first select | `approval.act` |
 | `/approvals/[id]` | The requisition with the Approve / Return / Reject card: the only place to Return, and with the inbox rows the only places decisions are taken (owner, 2026-11-05; inbox Approve / Reject added 2026-11-08); `components/RequisitionDetail.tsx` with `inbox` | `approval.act` |
@@ -981,7 +986,7 @@ Never edit an applied migration; add a new one. `synchronize` is off.
 | `/joining` | Joining Pending with Pending and Rejected tabs; approve, reject, move back to pending. Pending also has a **Salary** column (owner, 2026-11-09: free text such as "45,000 per month", saved with its own Save button or Enter, Esc puts the saved value back; `PUT joining/:id` `{ salary }`, trimmed, empty clears it, audited `joining.update`; shown on Joined Candidates for recruitment users, hidden from department users like the contacts), a planned joining date filter, row checkboxes, "Select all shown" and "Join selected" with one actual joining date for all (owner, 2026-11-08); rows whose vacancy is full cannot be ticked; refused ones are listed with the reason | `joining.view` |
 | `/joined` | Joined Candidates | `joining.view_joined` |
 | `/admin/users` | Users & Roles: tabs Users, Roles, Permissions, Permission Templates | `admin.users` |
-| `/admin/master`, `/admin/templates` | Sidebar section **Predefined Fields**: Master Data (companies, departments, positions; add, edit, deactivate, delete) and Email Templates (edit, delete) | `master.configure`, `email.manage_template` |
+| `/admin/master`, `/admin/templates` | Sidebar section **Predefined Fields**: Master Data (companies, departments with `totalQuota`, positions; add, edit, deactivate, delete) and Email Templates (edit, delete) | `master.configure`, `email.manage_template` |
 | `/admin/audit` | Audit Log | `audit.view` |
 
 Components: `RequisitionForm`, `FormView` (Form No. 01 layout), `EmailComposer`, `components/vacancy/` (`CandidatesTab`, `EvaluationTab`, `CoordinatorSelect`), `components/admin/` (`UsersTab`, `RolesTemplatesTabs`, `PermissionGrid`).

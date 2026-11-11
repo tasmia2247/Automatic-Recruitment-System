@@ -61,3 +61,8 @@ export class DocumentQuery {
 export class AssignDto {
   @IsUUID() vacancyId: string;
 }
+
+/** Bulk CV pack: merge the original CVs of the given applications into one PDF (owner, 2026-11-10). */
+export class CvPackDto {
+  @IsArray() @ArrayMinSize(1) @IsUUID('all', { each: true }) applicationIds: string[];
+}

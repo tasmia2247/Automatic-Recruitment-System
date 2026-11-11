@@ -130,7 +130,8 @@ export default function InterviewPage() {
   const tickCell = (r: any) => <Td><input type="checkbox" className="accent-brand-600" aria-label={`Select ${r.name ?? r.applicationNo}`} checked={selected.has(r.applicationId)} onChange={() => toggle(r.applicationId)} /></Td>;
   const who = (r: any) => (
     <Td><Link className="font-medium text-brand-700 hover:underline" href={`/applications/${r.applicationId}`}>{r.name ?? r.applicationNo}</Link>
-      <div className="text-xs text-muted">{r.applicationNo}{r.phone ? ` · ${r.phone}` : ''}</div></Td>
+      <div className="text-xs text-muted">{r.applicationNo}{r.phone ? ` · ${r.phone}` : ''}</div>
+      {r.hasFile && r.documentId && <a className="text-xs text-brand-700 hover:underline" href={`/api/documents/${r.documentId}`} target="_blank" rel="noopener noreferrer">View CV</a>}</Td>
   );
   const vacCell = (r: any) => !vacancyId && <Td className="text-xs">{r.vacancy.positionTitle}<div className="text-muted">{r.vacancy.department} · {r.vacancy.vacancyNo}</div></Td>;
   const markCell = (r: any, round: string) => { const m = markOf(r, round); return <Td className="text-right tabular-nums">{m ? <>{m.marks}<span className="text-muted">/{m.maxMarks ?? '—'}</span></> : <span className="text-muted">—</span>}</Td>; };
@@ -188,6 +189,7 @@ export default function InterviewPage() {
             {can(P.EMAIL_SEND) && <Button size="sm" variant="secondary" onClick={() => setDialog('result')}>Email result</Button>}
             {can(P.FINAL_DECISION) && decided.length > 0 && <Button size="sm" variant="danger" onClick={() => setDialog('undo')}>Remove decision</Button>}
           </>}
+          {can(P.CV_DOWNLOAD) && <Button size="sm" variant="secondary" onClick={() => act.run(() => download('/applications/cv-pack', { applicationIds: [...selected] }), 'CV ZIP downloaded.')}>Download CVs</Button>}
           <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>Clear</Button>
         </div>
       )}

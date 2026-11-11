@@ -9,18 +9,27 @@ type Kind = 'companies' | 'departments' | 'positions';
 export default function MasterDataPage() {
   const [tab, setTab] = useState<Kind>('companies');
   const state = useLoad(() => api('/master/lookups'));
-  const [draft, setDraft] = useState<{ code: string; name: string }>({ code: '', name: '' });
+  const [draft, setDraft] = useState<{ code: string; name: string; totalQuota: string }>({ code: '', name: '', totalQuota: '' });
   const [editing, setEditing] = useState<any | null>(null);
   const [removing, setRemoving] = useState<any | null>(null);
   const act = useAction();
 
+  const num = (s: string) => (s === '' ? null : Number(s));
   const add = async () => {
-    const body = tab === 'positions' ? { title: draft.name, code: draft.code || undefined } : { code: draft.code, name: draft.name };
+    const body = tab === 'positions'
+      ? { title: draft.name, code: draft.code || undefined }
+      : tab === 'departments'
+        ? { code: draft.code, name: draft.name, totalQuota: num(draft.totalQuota) }
+        : { code: draft.code, name: draft.name };
     const r = await act.run(() => api(`/master/${tab}`, { body }), 'Added.');
-    if (r) { setDraft({ code: '', name: '' }); state.reload(); }
+    if (r) { setDraft({ code: '', name: '', totalQuota: '' }); state.reload(); }
   };
   const save = async (row: any) => {
-    const body = tab === 'positions' ? { title: row.title, code: row.code || undefined, active: row.active } : { code: row.code, name: row.name, active: row.active };
+    const body = tab === 'positions'
+      ? { title: row.title, code: row.code || undefined, active: row.active }
+      : tab === 'departments'
+        ? { code: row.code, name: row.name, active: row.active, totalQuota: row.totalQuota === '' || row.totalQuota == null ? null : Number(row.totalQuota) }
+        : { code: row.code, name: row.name, active: row.active };
     const r = await act.run(() => api(`/master/${tab}/${row.id}`, { method: 'PATCH', body }), 'Saved.');
     if (r) { setEditing(null); state.reload(); }
   };
@@ -41,27 +50,38 @@ export default function MasterDataPage() {
         <div className="flex flex-wrap gap-2 border-b border-line p-3">
           <Input className="max-w-[10rem]" placeholder={tab === 'positions' ? 'Code (optional)' : 'Code'} value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} />
           <Input className="max-w-sm" placeholder={tab === 'positions' ? 'Position title' : 'Name'} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+          {tab === 'departments' && (
+            <Input className="max-w-[9rem]" type="number" min={0} placeholder="Total quota" value={draft.totalQuota} onChange={(e) => setDraft({ ...draft, totalQuota: e.target.value })} />
+          )}
           <Button busy={act.busy} disabled={!draft.name || (tab !== 'positions' && !draft.code)} onClick={add}>Add</Button>
         </div>
         <Loaded state={state}>
-          {(d: any) => (
-            <Table head={['Code', tab === 'positions' ? 'Title' : 'Name', 'Status', '']}>
-              {d[tab].map((row: any) => {
-                const e = editing?.id === row.id ? editing : null;
-                const nameKey = tab === 'positions' ? 'title' : 'name';
-                return (
-                  <tr key={row.id}>
-                    <Td>{e ? <Input className="w-28" value={e.code ?? ''} onChange={(ev) => setEditing({ ...e, code: ev.target.value })} /> : row.code ?? '—'}</Td>
-                    <Td>{e ? <Input value={e[nameKey]} onChange={(ev) => setEditing({ ...e, [nameKey]: ev.target.value })} /> : row[nameKey]}</Td>
-                    <Td>{e ? <label className="flex items-center gap-1 text-sm"><input type="checkbox" className="accent-brand-600" checked={e.active} onChange={(ev) => setEditing({ ...e, active: ev.target.checked })} /> Active</label>
-                      : <Badge tone={row.active ? 'green' : 'slate'}>{row.active ? 'Active' : 'Inactive'}</Badge>}</Td>
-                    <Td>{e ? <div className="flex gap-1"><Button size="sm" onClick={() => save(e)}>Save</Button><Button size="sm" variant="secondary" onClick={() => setEditing(null)}>Cancel</Button></div>
-                      : <div className="flex gap-1"><Button size="sm" variant="secondary" onClick={() => setEditing({ ...row })}>Edit</Button><Button size="sm" variant="danger" onClick={() => setRemoving(row)}>Delete</Button></div>}</Td>
-                  </tr>
-                );
-              })}
-            </Table>
-          )}
+          {(d: any) => {
+            const head = tab === 'departments' ? ['Code', 'Name', 'Total quota', 'Status', ''] : ['Code', tab === 'positions' ? 'Title' : 'Name', 'Status', ''];
+            return (
+              <Table head={head}>
+                {d[tab].map((row: any) => {
+                  const e = editing?.id === row.id ? editing : null;
+                  const nameKey = tab === 'positions' ? 'title' : 'name';
+                  return (
+                    <tr key={row.id}>
+                      <Td>{e ? <Input className="w-28" value={e.code ?? ''} onChange={(ev) => setEditing({ ...e, code: ev.target.value })} /> : row.code ?? '—'}</Td>
+                      <Td>{e ? <Input value={e[nameKey]} onChange={(ev) => setEditing({ ...e, [nameKey]: ev.target.value })} /> : row[nameKey]}</Td>
+                      {tab === 'departments' && (
+                        <Td>{e
+                          ? <Input className="w-24 tabular-nums" type="number" min={0} value={e.totalQuota ?? ''} onChange={(ev) => setEditing({ ...e, totalQuota: ev.target.value === '' ? null : ev.target.value })} />
+                          : <span className="tabular-nums">{row.totalQuota ?? <span className="text-muted">Not set</span>}</span>}</Td>
+                      )}
+                      <Td>{e ? <label className="flex items-center gap-1 text-sm"><input type="checkbox" className="accent-brand-600" checked={e.active} onChange={(ev) => setEditing({ ...e, active: ev.target.checked })} /> Active</label>
+                        : <Badge tone={row.active ? 'green' : 'slate'}>{row.active ? 'Active' : 'Inactive'}</Badge>}</Td>
+                      <Td>{e ? <div className="flex gap-1"><Button size="sm" onClick={() => save(e)}>Save</Button><Button size="sm" variant="secondary" onClick={() => setEditing(null)}>Cancel</Button></div>
+                        : <div className="flex gap-1"><Button size="sm" variant="secondary" onClick={() => setEditing({ ...row })}>Edit</Button><Button size="sm" variant="danger" onClick={() => setRemoving(row)}>Delete</Button></div>}</Td>
+                    </tr>
+                  );
+                })}
+              </Table>
+            );
+          }}
         </Loaded>
       </Card>
       <ConfirmDialog open={!!removing} danger title={`Delete ${removing ? label(removing) : ''}`} confirmLabel="Delete" busy={act.busy}

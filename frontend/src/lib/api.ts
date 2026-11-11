@@ -34,9 +34,9 @@ export async function api<T = any>(path: string, opts: Opts = {}): Promise<T> {
   return (text ? JSON.parse(text) : null) as T;
 }
 
-/** Downloads an authorized file response (Excel export, templates). */
-export async function download(path: string) {
-  const res: Response = await api(path, { raw: true });
+/** Downloads an authorized file response (Excel export, templates, CV pack). Pass `body` to POST a JSON payload. */
+export async function download(path: string, body?: unknown) {
+  const res: Response = await api(path, { raw: true, ...(body !== undefined ? { method: 'POST', body } : {}) });
   const blob = await res.blob();
   const cd = res.headers.get('Content-Disposition') ?? '';
   const name = decodeURIComponent(cd.match(/filename="?([^";]+)"?/)?.[1] ?? 'download');

@@ -70,15 +70,18 @@ const ROUTE: [string, string][] = [
 ];
 
 /** [company, department, position|null, approvedQuota, presentManpower] - illustrative figures, edit in the UI. */
-const QUOTAS: [string, string, string | null, number | null, number | null][] = [
-  ['HO', 'ICT', null, 20, 16],
-  ['HO', 'ICT', 'Software Developer', 10, 8],
-  ['HO', 'ICT', 'Executive', 4, 4],
-  ['HO', 'ICT', 'Manager', 1, null],
-  ['HO', 'ADMIN', null, 15, 14],
-  ['HO', 'ADMIN', 'Asst. Executive', 6, 5],
-  ['AJL', 'MED', null, 6, 5],
-  ['AJL', 'MED', 'Nurse', 4, 3],
+/** Department totals (owner, 2026-11-10): master-data level, no company dimension, used by the requisition form. */
+const DEPARTMENT_TOTALS: [string, number][] = [
+  ['ICT', 20], ['ADMIN', 15], ['MED', 6],
+];
+
+/** Designation quotas (owner, 2026-11-10: no company dimension — applies across attached companies). */
+const QUOTAS: [string, string, number | null, number | null][] = [
+  ['ICT', 'Software Developer', 10, 8],
+  ['ICT', 'Executive', 4, 4],
+  ['ICT', 'Manager', 1, null],
+  ['ADMIN', 'Asst. Executive', 6, 5],
+  ['MED', 'Nurse', 4, 3],
 ];
 
 const TEMPLATES: { name: string; kind: EmailTemplate['kind']; subject: string; body: string }[] = [
@@ -201,12 +204,15 @@ export async function seed(ds: DataSource, log = console.log) {
     await m.save(route);
   }
 
-  for (const [cc, dc, pos, quota, present] of QUOTAS) {
-    const companyId = (await m.findOneByOrFail(Company, { code: cc })).id;
+  for (const [dc, total] of DEPARTMENT_TOTALS) {
+    const d = await m.findOneByOrFail(Department, { code: dc });
+    if (d.totalQuota == null) await m.update(Department, d.id, { totalQuota: total });
+  }
+  for (const [dc, pos, quota, present] of QUOTAS) {
     const departmentId = await dept(dc);
-    const positionId = pos ? (await m.findOneByOrFail(Position, { title: pos })).id : null;
-    if (!(await m.exists(ManpowerQuota, { where: { companyId, departmentId, positionId: positionId ?? IsNull() } }))) {
-      await m.insert(ManpowerQuota, { companyId, departmentId, positionId, approvedQuota: quota, presentManpower: present, remarks: 'Prototype seed figure' });
+    const positionId = (await m.findOneByOrFail(Position, { title: pos })).id;
+    if (!(await m.exists(ManpowerQuota, { where: { departmentId, positionId } }))) {
+      await m.insert(ManpowerQuota, { departmentId, positionId, approvedQuota: quota, presentManpower: present, remarks: 'Prototype seed figure' });
     }
   }
 

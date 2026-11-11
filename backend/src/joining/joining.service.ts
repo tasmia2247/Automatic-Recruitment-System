@@ -41,14 +41,23 @@ export class JoiningService {
     return this.withSeats(await qb.getMany());
   }
 
-  /** Each row with its vacancy's headcount and approved joinings, so HR sees when the seats are already taken. */
+  /** Each row with its vacancy's headcount, approved joinings, and the newest CV document (for download / bulk CV pack). */
   private async withSeats(rows: JoiningRecord[]) {
     const vacancyIds = [...new Set(rows.map((j) => j.application.vacancyId))];
-    const counts: { vacancyId: string; n: number }[] = vacancyIds.length ? await this.ds.query(
-      `SELECT a."vacancyId", count(*)::int AS n FROM joining_records jr JOIN applications a ON a.id = jr."applicationId"
-        WHERE jr.status = 'Approved' AND a."vacancyId" = ANY($1) GROUP BY a."vacancyId"`, [vacancyIds]) : [];
-    const joined = new Map(counts.map((c) => [c.vacancyId, c.n]));
-    return rows.map((j) => ({ ...this.view(j), headcount: j.application.vacancy.headcount, joinedCount: joined.get(j.application.vacancyId) ?? 0 }));
+    const appIds = rows.map((j) => j.applicationId);
+    const [counts, docs] = await Promise.all([
+      vacancyIds.length ? this.ds.query(
+        `SELECT a."vacancyId", count(*)::int AS n FROM joining_records jr JOIN applications a ON a.id = jr."applicationId"
+          WHERE jr.status = 'Approved' AND a."vacancyId" = ANY($1) GROUP BY a."vacancyId"`, [vacancyIds]) : [],
+      appIds.length ? this.ds.query(
+        `SELECT DISTINCT ON ("applicationId") "applicationId", id, "originalName", ("storageKey" IS NOT NULL) AS "hasFile"
+           FROM candidate_documents WHERE "applicationId" = ANY($1::uuid[])
+          ORDER BY "applicationId", "createdAt" DESC`, [appIds]) : [],
+    ]);
+    const joined = new Map((counts as any[]).map((c) => [c.vacancyId, c.n]));
+    const docByApp = new Map<string, { id: string; originalName: string; hasFile: boolean }>((docs as any[]).map((d) => [d.applicationId, { id: d.id, originalName: d.originalName, hasFile: d.hasFile }]));
+    return rows.map((j) => ({ ...this.view(j), headcount: j.application.vacancy.headcount, joinedCount: joined.get(j.application.vacancyId) ?? 0,
+      documentId: docByApp.get(j.applicationId)?.id ?? null, documentName: docByApp.get(j.applicationId)?.originalName ?? null, hasFile: !!docByApp.get(j.applicationId)?.hasFile }));
   }
 
   async joined(q: JoinedQuery, me: AuthUser) {
@@ -64,8 +73,16 @@ export class JoiningService {
     const total = await qb.getCount();
     const { skip, take } = skipTake(q);
     const { entities, raw } = await qb.offset(skip).limit(take).getRawAndEntities();
+    const appIds = entities.map((j) => j.applicationId);
+    const docs = appIds.length ? await this.ds.query(
+      `SELECT DISTINCT ON ("applicationId") "applicationId", id, "originalName", ("storageKey" IS NOT NULL) AS "hasFile"
+         FROM candidate_documents WHERE "applicationId" = ANY($1::uuid[])
+        ORDER BY "applicationId", "createdAt" DESC`, [appIds]) : [];
+    const docByApp = new Map<string, any>((docs as any[]).map((d) => [d.applicationId, d]));
     return paged(entities.map((j) => {
-      const row = { ...this.view(j), approvedBy: raw.find((r) => r.j_id === j.id)?.approver ?? null };
+      const d = docByApp.get(j.applicationId);
+      const row = { ...this.view(j), approvedBy: raw.find((r) => r.j_id === j.id)?.approver ?? null,
+        documentId: d?.id ?? null, documentName: d?.originalName ?? null, hasFile: !!d?.hasFile };
       // Department users do not see the salary either (owner, 2026-11-09: kept with recruitment).
       return contacts ? row : { ...row, email: null, phone: null, salary: null };
     }), total, q);
@@ -180,23 +197,25 @@ export class JoiningService {
   }
 
   /**
-   * Shifts the dept-total and (where it exists) matching designation quota row's `presentManpower` by `delta`.
+   * Shifts the matching (company, department, position) quota row's `presentManpower` by `delta`
+   * (owner, 2026-11-10: dept-total rows are gone — the department's present manpower is derived as the sum
+   * of its designation rows, so no separate write is needed).
    * Rows that do not exist are left alone — an admin must create the baseline row first for auto-tracking to kick in.
    * Audits every change so figures can be traced back to the joining that drove them.
    */
   private async adjustManpower(m: EntityManager, v: Vacancy, delta: number, me: AuthUser) {
-    const rows: { id: string; positionId: string | null; before: number | null }[] = await m.query(
-      `SELECT id, "positionId", "presentManpower" AS before FROM manpower_quotas
-        WHERE "companyId" = $1 AND "departmentId" = $2 AND ("positionId" IS NULL OR "positionId" = $3)
+    const rows: { id: string; before: number | null }[] = await m.query(
+      `SELECT id, "presentManpower" AS before FROM manpower_quotas
+        WHERE "departmentId" = $1 AND "positionId" = $2
         FOR UPDATE`,
-      [v.companyId, v.departmentId, v.positionId]);
+      [v.departmentId, v.positionId]);
     for (const r of rows) {
       const before = r.before ?? 0;
       const after = Math.max(0, before + delta);
       if (after === r.before) continue;
       await m.update(ManpowerQuota, r.id, { presentManpower: after, updatedById: me.id });
       await this.audit.log(m, me, 'quota.auto_update', 'ManpowerQuota', r.id, {
-        label: r.positionId ? 'Designation' : 'Department total',
+        label: 'Designation',
         old: { presentManpower: r.before },
         new: { presentManpower: after, reason: delta > 0 ? 'joining.approved' : 'joining.reverted' },
       });

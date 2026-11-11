@@ -8,7 +8,7 @@ import { P } from '../common/permissions';
 import { assertDepartmentAccess, computeVacancy, departmentScope, inScope, resolveScope } from '../common/scope';
 import { AuditService, diff, IdService, NotificationService, StorageService, today, validateUpload } from '../common/services';
 import {
-  APPROVAL_STATUS, ApprovalAction, ApprovalRoute, ManpowerQuota, REQ_STATUS, Requisition, RequisitionAttachment,
+  APPROVAL_STATUS, ApprovalAction, ApprovalRoute, Department, ManpowerQuota, REQ_STATUS, Requisition, RequisitionAttachment,
 } from '../database/entities';
 import { CorporateHrDto, RequisitionDto, RequisitionListQuery } from './requisitions.dto';
 
@@ -519,19 +519,31 @@ export class RequisitionService {
   }
 
   private async applyRevisedQuota(m: EntityManager, r: Requisition, me: AuthUser) {
-    const apply = async (positionId: string | null, revised: number | null) => {
-      if (revised === null || revised === undefined) return;
-      let q = await m.findOne(ManpowerQuota, { where: { companyId: r.companyId, departmentId: r.departmentId, positionId: positionId ?? IsNull() } });
+    // Dept total is on the department master (owner, 2026-11-10); only designation goes to `manpower_quotas`.
+    if (r.revisedQuotaDept !== null && r.revisedQuotaDept !== undefined) {
+      const dept = await m.findOne(Department, { where: { id: r.departmentId } });
+      if (dept) {
+        const old = dept.totalQuota ?? null;
+        dept.totalQuota = r.revisedQuotaDept;
+        await m.save(dept);
+        await this.audit.log(m, me, 'quota.revise_from_requisition', 'Department', dept.id, {
+          label: r.reqNo, old: { totalQuota: old }, new: { totalQuota: r.revisedQuotaDept },
+        });
+      }
+    }
+    if (r.positionId && r.revisedQuotaDesig !== null && r.revisedQuotaDesig !== undefined) {
+      const positionId = r.positionId;
+      let q = await m.findOne(ManpowerQuota, { where: { departmentId: r.departmentId, positionId } });
       const old = q?.approvedQuota ?? null;
-      if (!q) q = m.create(ManpowerQuota, { companyId: r.companyId, departmentId: r.departmentId, positionId, presentManpower: null });
-      q.approvedQuota = revised;
+      if (!q) q = m.create(ManpowerQuota, { departmentId: r.departmentId, positionId, presentManpower: null });
+      q.approvedQuota = r.revisedQuotaDesig;
       q.updatedById = me.id;
       q.remarks = `Revised via ${r.reqNo}`;
       await m.save(q);
-      await this.audit.log(m, me, 'quota.revise_from_requisition', 'ManpowerQuota', q.id, { label: r.reqNo, old: { approvedQuota: old }, new: { approvedQuota: revised } });
-    };
-    await apply(null, r.revisedQuotaDept);
-    if (r.positionId) await apply(r.positionId, r.revisedQuotaDesig);
+      await this.audit.log(m, me, 'quota.revise_from_requisition', 'ManpowerQuota', q.id, {
+        label: r.reqNo, old: { approvedQuota: old }, new: { approvedQuota: r.revisedQuotaDesig },
+      });
+    }
   }
 
   // ------------------------------------------------------------------ attachments

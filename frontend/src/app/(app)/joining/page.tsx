@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { EmailComposer } from '@/components/EmailComposer';
 import { Alert, Badge, Button, Card, ConfirmDialog, Field, Input, Loaded, Modal, PageHeader, Select, Table, Tabs, Td, Textarea, useAction, useLoad } from '@/components/ui';
-import { api, fmtDate, fmtDateTime } from '@/lib/api';
+import { api, download, fmtDate, fmtDateTime } from '@/lib/api';
 import { P, useAuth } from '@/lib/auth';
 
 /** Today in the browser's time zone, as YYYY-MM-DD for date inputs. */
@@ -126,7 +126,9 @@ export default function JoiningPendingPage() {
                 <Table head={['Candidate', 'Position / Vacancy', 'Department · Company', 'Contact', 'Reason', 'Rejected', '']}>
                   {rej.shown.map((j) => (
                     <tr key={j.id}>
-                      <Td><Link className="font-medium text-brand-700 hover:underline" href={`/applications/${j.applicationId}`}>{j.name ?? j.applicationNo}</Link><div className="text-xs text-muted">{j.candidateNo} · {j.applicationNo}</div><div className="mt-1"><Badge tone="red">Rejected</Badge></div></Td>
+                      <Td><Link className="font-medium text-brand-700 hover:underline" href={`/applications/${j.applicationId}`}>{j.name ?? j.applicationNo}</Link><div className="text-xs text-muted">{j.candidateNo} · {j.applicationNo}</div>
+                        {j.hasFile && j.documentId && <a className="text-xs text-brand-700 hover:underline" href={`/api/documents/${j.documentId}`} target="_blank" rel="noopener noreferrer">View CV</a>}
+                        <div className="mt-1"><Badge tone="red">Rejected</Badge></div></Td>
                       <Td>{j.position}<div className="text-xs text-muted">{j.vacancyNo}</div><Seats j={j} /></Td>
                       <Td className="text-xs">{j.department}<div className="text-muted">{j.company}</div></Td>
                       <Td className="text-xs">{j.email}<div className="text-muted">{j.phone}</div></Td>
@@ -154,6 +156,7 @@ export default function JoiningPendingPage() {
                       Select all {selectable.length} shown{pending.plannedOn ? ` with planned date ${fmtDate(pending.plannedOn)}` : ''}</label>
                     <Button size="sm" disabled={!chosen.length} onClick={() => setBatch({ joiningDate: pending.plannedOn || todayKey(), remarks: '' })}>Join selected ({chosen.length})</Button>
                     {canDecide && <Button size="sm" variant="secondary" disabled={!chosen.length} onClick={() => setBackTo(chosen)}>Back to interview ({chosen.length})</Button>}
+                    <Button size="sm" variant="secondary" disabled={!chosen.length} onClick={() => act.run(() => download('/applications/cv-pack', { applicationIds: chosen.map((j) => j.applicationId) }), 'CV ZIP downloaded.')}>Download CVs ({chosen.length})</Button>
                     {selectable.length < pending.shown.length && <span className="text-xs text-muted">Rows whose vacancy has every seat filled cannot be selected.</span>}
                   </div>
                 )}
@@ -163,6 +166,7 @@ export default function JoiningPendingPage() {
                     <tr key={j.id} className={picked.has(j.id) ? 'bg-brand-50/50' : ''}>
                       {canApprove && <Td><input type="checkbox" className="accent-brand-600" aria-label={`Select ${j.name ?? j.applicationNo}`} checked={picked.has(j.id)} disabled={seatsFull(j)} onChange={() => toggle(j.id)} /></Td>}
                       <Td><Link className="font-medium text-brand-700 hover:underline" href={`/applications/${j.applicationId}`}>{j.name ?? j.applicationNo}</Link><div className="text-xs text-muted">{j.candidateNo} · {j.applicationNo}</div>
+                        {j.hasFile && j.documentId && <a className="text-xs text-brand-700 hover:underline" href={`/api/documents/${j.documentId}`} target="_blank" rel="noopener noreferrer">View CV</a>}
                         {j.finalDecisionAt && <div className="text-xs text-muted">Selected {fmtDate(j.finalDecisionAt)}</div>}</Td>
                       <Td>{j.position}<div className="text-xs text-muted">{j.vacancyNo}</div><Seats j={j} /></Td>
                       <Td className="text-xs">{j.department}<div className="text-muted">{j.company}</div></Td>

@@ -10,7 +10,7 @@ import { AuthUser, CurrentUser, RequirePerm } from '../common/auth';
 import { P } from '../common/permissions';
 import { assertApplicationAccess, assertApplicationsAccess, assertDocumentAccess, assertVacancyAccess } from '../common/scope';
 import { CandidatesService } from './candidates.service';
-import { ApplicationListQuery, AssignDto, CorrectionDto, DocumentQuery, DuplicateDto, ExportQuery, RemarkDto, ShortlistDto } from './candidates.dto';
+import { ApplicationListQuery, AssignDto, CorrectionDto, CvPackDto, DocumentQuery, DuplicateDto, ExportQuery, RemarkDto, ShortlistDto } from './candidates.dto';
 import { MAX_MAIL_BYTES, MAX_MAILS_PER_UPLOAD, MailIntakeService } from './mail-intake.service';
 
 @Controller()
@@ -128,6 +128,20 @@ export class CandidatesController {
   async jobs(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() me: AuthUser) {
     await assertApplicationAccess(this.ds, me, id);
     return this.svc.pendingJobsFor(id);
+  }
+
+  /** Combined PDF of the selected candidates' CVs (owner, 2026-11-10). Used by Interview, Joining Pending and Joined pages. */
+  @Post('applications/cv-pack')
+  @HttpCode(200)
+  @RequirePerm(P.CV_DOWNLOAD)
+  async cvPack(@Body() dto: CvPackDto, @CurrentUser() me: AuthUser, @Res() res: Response) {
+    await assertApplicationsAccess(this.ds, me, dto.applicationIds);
+    const { fileName, buffer } = await this.svc.cvPack(dto.applicationIds, me);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(buffer);
   }
 
   @Get('documents/:id')

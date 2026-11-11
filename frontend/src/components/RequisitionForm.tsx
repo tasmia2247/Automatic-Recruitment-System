@@ -52,19 +52,27 @@ export function RequisitionForm({ initial }: { initial?: Form }) {
   });
   const err = (k: string) => errors[k] ?? save.fieldErrors[k];
 
-  // Prefill current quota / manpower from the quota list when the scope changes (still editable).
+  // Prefill current quota / manpower when the scope changes (owner, 2026-11-10: dept total from master data →
+  // Departments, dept present manpower is the live sum of designation rows; designation figures from the
+  // matching `/master/quotas` row).
+  // Prefill current quota / manpower from master data (owner, 2026-11-10: quotas are per department +
+  // designation, independent of the attached company, so only departmentId / positionId matter here).
   useEffect(() => {
-    if (initial?.id || !f.departmentId || !f.companyId) return;
-    api(`/master/quotas?departmentId=${f.departmentId}&companyId=${f.companyId}`).then((rows: any[]) => {
-      const dept = rows.find((r) => !r.positionId);
-      const desig = f.positionId ? rows.find((r) => r.positionId === f.positionId) : null;
+    if (initial?.id || !f.departmentId) return;
+    Promise.all([
+      api(`/master/dept-figures?departmentId=${f.departmentId}`).catch(() => null),
+      f.positionId ? api(`/master/quotas?departmentId=${f.departmentId}`).catch(() => []) : Promise.resolve([]),
+    ]).then(([dept, rows]) => {
+      const desig = f.positionId ? (rows as any[]).find((r) => r.positionId === f.positionId) : null;
       setF((p) => ({
         ...p,
-        currentQuotaDept: dept?.approvedQuota ?? p.currentQuotaDept ?? '', presentManpowerDept: dept?.presentManpower ?? p.presentManpowerDept ?? '',
-        currentQuotaDesig: desig?.approvedQuota ?? p.currentQuotaDesig ?? '', presentManpowerDesig: desig?.presentManpower ?? p.presentManpowerDesig ?? '',
+        currentQuotaDept: dept?.approvedQuota ?? p.currentQuotaDept ?? '',
+        presentManpowerDept: dept?.presentManpower ?? p.presentManpowerDept ?? '',
+        currentQuotaDesig: desig?.approvedQuota ?? p.currentQuotaDesig ?? '',
+        presentManpowerDesig: desig?.presentManpower ?? p.presentManpowerDesig ?? '',
       }));
-    }).catch(() => undefined);
-  }, [f.departmentId, f.companyId, f.positionId, initial?.id]);
+    });
+  }, [f.departmentId, f.positionId, initial?.id]);
 
   const calcDept = calc(f.currentQuotaDept, f.presentManpowerDept);
   const calcDesig = calc(f.currentQuotaDesig, f.presentManpowerDesig);
